@@ -1,0 +1,11 @@
+## .NET
+bin/
+obj/
+*.user
+.vs/
+
+## Build output
+dist/
+
+## Claude Code tooling state (not part of the project)
+.claude/
