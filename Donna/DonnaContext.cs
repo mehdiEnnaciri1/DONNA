@@ -1,0 +1,242 @@
+using Donna.Ai;
+using Donna.Config;
+using Donna.Core;
+using Donna.Input;
+using Donna.Ui;
+
+namespace Donna;
+
+/// <summary>
+/// Chef d'orchestre de DONNA : relie hooks, buffer, client Gemini et injecteur,
+/// charge/sauvegarde la configuration (clés API chiffrées DPAPI comprises), et
+/// gère l'icône de barre des tâches (menu Réglages / Quitter).
+/// </summary>
+public sealed class DonnaContext : ApplicationContext
+{
+    private const uint VK_BACK = 0x08;
+    private const uint VK_TAB = 0x09;
+    private const uint VK_RETURN = 0x0D;
+    private const uint VK_ESCAPE = 0x1B;
+    private const uint VK_END = 0x23;
+    private const uint VK_HOME = 0x24;
+    private const uint VK_LEFT = 0x25;
+    private const uint VK_UP = 0x26;
+    private const uint VK_RIGHT = 0x27;
+    private const uint VK_DOWN = 0x28;
+    private const uint VK_V = 0x56;
+
+    // Touches qui réinitialisent le buffer par prudence (clic et changement de
+    // fenêtre sont gérés séparément par MouseHook/ForegroundWatcher) — voir
+    // ARCHITECTURE.md §6 : « Entrée, Échap, Tab, flèches, Origine/Fin ».
+    private static readonly HashSet<uint> ResetKeys =
+        [VK_RETURN, VK_ESCAPE, VK_TAB, VK_HOME, VK_END, VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN];
+
+    private readonly ConfigStore _configStore = new();
+    private readonly KeyboardHook _keyboardHook = new();
+    private readonly MouseHook _mouseHook = new();
+    private readonly ForegroundWatcher _foregroundWatcher = new();
+    private readonly KeyTranslator _translator = new();
+    private readonly GeminiClient _gemini = new();
+    private readonly TextInjector _injector = new();
+    private readonly NotifyIcon _trayIcon;
+    private readonly PillOverlay _pill = new();
+
+    private TypingBuffer _buffer;
+    private KeyRing? _keyRing;
+    private string _model;
+
+    public DonnaContext()
+    {
+        AppConfig config = _configStore.Load();
+
+        _buffer = new TypingBuffer(config.TriggerWord);
+        _model = config.Model;
+        _injector.PasteRestoreDelayMs = config.PasteRestoreDelayMs;
+        _keyRing = TryCreateKeyRing(config);
+        DiagnosticLog.Enabled = config.LogsEnabled;
+
+        _keyboardHook.KeyDown += OnKeyDown;
+        _keyboardHook.KeyUp += OnKeyUp;
+        _mouseHook.Click += () => _buffer.Reset();
+        _foregroundWatcher.ForegroundChanged += () => _buffer.Reset();
+
+        _keyboardHook.Install();
+        _mouseHook.Install();
+        _foregroundWatcher.Install();
+
+        _trayIcon = CreateTrayIcon();
+    }
+
+    private static KeyRing? TryCreateKeyRing(AppConfig config)
+    {
+        if (config.EncryptedApiKeys.Count == 0)
+            return null;
+
+        List<string> keys = config.EncryptedApiKeys.Select(DpapiSecret.Unprotect).ToList();
+        return new KeyRing(keys);
+    }
+
+    private NotifyIcon CreateTrayIcon()
+    {
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Réglages...", null, (_, _) => OpenSettings());
+        menu.Items.Add("Quitter", null, (_, _) => ExitDonna());
+
+        Icon icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
+
+        return new NotifyIcon
+        {
+            Icon = icon,
+            Text = "DONNA",
+            ContextMenuStrip = menu,
+            Visible = true,
+        };
+    }
+
+    private void OpenSettings()
+    {
+        AppConfig config = _configStore.Load();
+        List<string> decryptedKeys = config.EncryptedApiKeys.Select(DpapiSecret.Unprotect).ToList();
+
+        using var form = new SettingsForm(config, decryptedKeys, Autostart.IsEnabled());
+        if (form.ShowDialog() != DialogResult.OK)
+            return;
+
+        AppConfig updated = form.ToConfig();
+        updated.EncryptedApiKeys = form.DecryptedApiKeys.Select(DpapiSecret.Protect).ToList();
+
+        _configStore.Save(updated);
+        Autostart.SetEnabled(form.AutostartEnabled);
+
+        // Applique les nouveaux réglages sans redémarrer DONNA.
+        _buffer = new TypingBuffer(updated.TriggerWord);
+        _model = updated.Model;
+        _injector.PasteRestoreDelayMs = updated.PasteRestoreDelayMs;
+        _keyRing = TryCreateKeyRing(updated);
+        DiagnosticLog.Enabled = updated.LogsEnabled;
+    }
+
+    private void OnKeyDown(KeyEvent evt)
+    {
+        // Ignore les touches injectées par TextInjector lui-même (ses propres
+        // Backspace/Ctrl+V repassent par ce même hook) — sinon boucle de rétroaction.
+        if (evt.IsInjected)
+            return;
+
+        bool wasControlDown = _translator.IsControlDown;
+        _translator.OnKeyDown(evt.VkCode);
+
+        if (evt.VkCode == VK_BACK)
+        {
+            _buffer.Backspace();
+            return;
+        }
+
+        // Collage manuel (Ctrl+V) : le champ a pu changer sous nos pieds, reset par prudence.
+        if (evt.VkCode == VK_V && wasControlDown)
+        {
+            _buffer.Reset();
+            return;
+        }
+
+        if (ResetKeys.Contains(evt.VkCode))
+        {
+            _buffer.Reset();
+            return;
+        }
+
+        string text = _translator.Translate(evt.VkCode, evt.ScanCode);
+        if (text.Length == 0)
+            return;
+
+        var match = _buffer.Append(text);
+        if (match is { } trigger)
+            _ = ProcessTriggerAsync(trigger); // fire-and-forget : ne jamais bloquer le hook clavier (synchrone, tout le système)
+    }
+
+    private void OnKeyUp(KeyEvent evt)
+    {
+        if (!evt.IsInjected)
+            _translator.OnKeyUp(evt.VkCode);
+    }
+
+    private async Task ProcessTriggerAsync(TriggerMatch trigger)
+    {
+        // Pas de ConfigureAwait(false) ici, volontairement : TextInjector.Replace
+        // utilise le presse-papiers WinForms (Clipboard), qui exige un thread STA.
+        // Rester sur le contexte de synchronisation WinForms garantit qu'on
+        // reprend sur le thread UI (STA) après l'appel réseau, pas sur un
+        // thread du pool (MTA) qui ferait planter Clipboard.
+        _pill.ShowSending();
+        try
+        {
+            string reply = await GenerateWithKeyRotationAsync(trigger.Source, trigger.Prompt);
+            string cleaned = ResponseCleaner.Clean(reply);
+            _injector.Replace(trigger.CharsToDelete, cleaned);
+            _pill.ShowSuccess();
+        }
+        catch (Exception ex)
+        {
+            // On affiche l'erreur AVANT de tenter le nettoyage : si jamais
+            // l'effacement de la formule échoue lui-même (ex. TextInjector),
+            // l'utilisateur voit quand même l'erreur d'origine au lieu que la
+            // pastille reste bloquée indéfiniment sur "Envoi en cours".
+            DiagnosticLog.LogException(ex);
+            _pill.ShowError(ex.Message);
+            try
+            {
+                _injector.Replace(trigger.CharsToDelete, "");
+            }
+            catch
+            {
+                // Le nettoyage est un confort, pas critique : on ne remplace
+                // pas le message d'erreur déjà affiché par un second échec.
+            }
+        }
+    }
+
+    private async Task<string> GenerateWithKeyRotationAsync(string source, string prompt)
+    {
+        if (_keyRing is null)
+            throw new InvalidOperationException("Aucune clé API Gemini configurée. Ouvre Réglages pour en ajouter une.");
+
+        while (true)
+        {
+            string apiKey = _keyRing.CurrentKey
+                ?? throw new InvalidOperationException("Toutes les clés API Gemini ont atteint leur quota. Réessaie plus tard ou ajoute une nouvelle clé dans Réglages.");
+
+            try
+            {
+                return await _gemini.GenerateAsync(apiKey, _model, source, prompt);
+            }
+            catch (GeminiQuotaExceededException)
+            {
+                _keyRing.MarkCurrentAsQuotaExceeded();
+                // On boucle : soit une clé suivante est disponible et on la
+                // réessaie, soit CurrentKey vaudra null et la garde du haut
+                // ci-dessus lèvera l'erreur au tour suivant.
+            }
+        }
+    }
+
+    private void ExitDonna()
+    {
+        _trayIcon.Visible = false;
+        Application.Exit();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _keyboardHook.Dispose();
+            _mouseHook.Dispose();
+            _foregroundWatcher.Dispose();
+            _gemini.Dispose();
+            _trayIcon.Dispose();
+            _pill.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
+}
