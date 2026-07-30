@@ -52,7 +52,6 @@ public sealed class DonnaContext : ApplicationContext
 
         _buffer = new TypingBuffer(config.TriggerWord);
         _model = config.Model;
-        _injector.PasteRestoreDelayMs = config.PasteRestoreDelayMs;
         _keyRing = TryCreateKeyRing(config);
         DiagnosticLog.Enabled = config.LogsEnabled;
 
@@ -112,7 +111,6 @@ public sealed class DonnaContext : ApplicationContext
         // Applique les nouveaux réglages sans redémarrer DONNA.
         _buffer = new TypingBuffer(updated.TriggerWord);
         _model = updated.Model;
-        _injector.PasteRestoreDelayMs = updated.PasteRestoreDelayMs;
         _keyRing = TryCreateKeyRing(updated);
         DiagnosticLog.Enabled = updated.LogsEnabled;
     }
@@ -163,11 +161,10 @@ public sealed class DonnaContext : ApplicationContext
 
     private async Task ProcessTriggerAsync(TriggerMatch trigger)
     {
-        // Pas de ConfigureAwait(false) ici, volontairement : TextInjector.Replace
-        // utilise le presse-papiers WinForms (Clipboard), qui exige un thread STA.
-        // Rester sur le contexte de synchronisation WinForms garantit qu'on
-        // reprend sur le thread UI (STA) après l'appel réseau, pas sur un
-        // thread du pool (MTA) qui ferait planter Clipboard.
+        // Pas de ConfigureAwait(false) ici, volontairement : _pill (PillOverlay)
+        // est un contrôle WinForms, ses méthodes doivent s'exécuter sur le thread
+        // UI. Rester sur le contexte de synchronisation WinForms garantit qu'on
+        // y reprend après l'appel réseau, pas sur un thread du pool.
         _pill.ShowSending();
         try
         {
@@ -178,21 +175,11 @@ public sealed class DonnaContext : ApplicationContext
         }
         catch (Exception ex)
         {
-            // On affiche l'erreur AVANT de tenter le nettoyage : si jamais
-            // l'effacement de la formule échoue lui-même (ex. TextInjector),
-            // l'utilisateur voit quand même l'erreur d'origine au lieu que la
-            // pastille reste bloquée indéfiniment sur "Envoi en cours".
+            // Échec (quota, réseau, clé invalide...) : on n'efface RIEN. La formule
+            // tapée par l'utilisateur reste visible à l'écran — il ne perd jamais
+            // son texte, il peut juste retaper les deux espaces pour réessayer.
             DiagnosticLog.LogException(ex);
             _pill.ShowError(ex.Message);
-            try
-            {
-                _injector.Replace(trigger.CharsToDelete, "");
-            }
-            catch
-            {
-                // Le nettoyage est un confort, pas critique : on ne remplace
-                // pas le message d'erreur déjà affiché par un second échec.
-            }
         }
     }
 
