@@ -44,7 +44,16 @@ public sealed class TypingBuffer
             return null;
 
         _buffer.Append(text);
-        return Detect();
+        TriggerMatch? match = Detect();
+
+        // Une formule traitée (avec succès ou pas) ne doit jamais rester dans le
+        // buffer : sinon la frappe suivante s'accumule par-dessus, et la détection
+        // du prochain déclencheur récupère un mélange de l'ancienne et de la
+        // nouvelle formule comme source.
+        if (match is not null)
+            Reset();
+
+        return match;
     }
 
     /// <summary>Retire le dernier caractère (touche Retour arrière).</summary>

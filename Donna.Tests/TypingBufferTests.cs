@@ -86,4 +86,22 @@ public class TypingBufferTests
         buf.Reset();
         Assert.Equal(0, buf.Length);
     }
+
+    [Fact]
+    public void Une_formule_traitee_ne_contamine_pas_la_formule_suivante()
+    {
+        // Bug réel : sans reset après un match, le texte tapé ensuite s'accumule
+        // par-dessus l'ancienne formule déjà traitée.
+        var buf = new TypingBuffer();
+        foreach (var ch in "ancien texte donna vieux prompt  ")
+            buf.Append(ch.ToString());
+
+        TriggerMatch? second = null;
+        foreach (var ch in "nouveau texte donna nouveau prompt  ")
+            second = buf.Append(ch.ToString());
+
+        Assert.NotNull(second);
+        Assert.Equal("nouveau texte", second!.Value.Source);
+        Assert.Equal("nouveau prompt", second.Value.Prompt);
+    }
 }
