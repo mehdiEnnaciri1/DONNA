@@ -166,10 +166,11 @@ public sealed class DonnaContext : ApplicationContext
 
     private async Task ProcessTriggerAsync(TriggerMatch trigger)
     {
-        // Pas de ConfigureAwait(false) ici, volontairement : _pill (PillOverlay)
-        // est un contrôle WinForms, ses méthodes doivent s'exécuter sur le thread
-        // UI. Rester sur le contexte de synchronisation WinForms garantit qu'on
-        // y reprend après l'appel réseau, pas sur un thread du pool.
+        // Pas de ConfigureAwait(false) ici, volontairement : _pill (PillOverlay) est
+        // un contrôle WinForms, et SelectionReader.ReadSelection fait des appels OLE
+        // (Clipboard) — les deux exigent le thread UI STA. Rester sur le contexte de
+        // synchronisation WinForms garantit qu'on y reprend après l'appel réseau,
+        // jamais sur un thread du pool.
         _pill.ShowSending();
 
         // TypingBuffer ne voit ni le texte collé (Ctrl+V réinitialise le buffer par
@@ -187,7 +188,12 @@ public sealed class DonnaContext : ApplicationContext
             {
                 _injector.Replace(trigger.TriggerLength, "");
 
-                source = await Task.Run(() => _selectionReader.ReadSelection(_sourceScope));
+                // Appel STRICTEMENT synchrone, sans Task.Run : ReadSelection fait des
+                // appels OLE (Clipboard) qui exigent le thread UI STA courant. Un
+                // Task.Run l'exécuterait sur un thread du pool (MTA) et ferait échouer
+                // ces appels. Ce blocage synchrone (jusqu'à ~500 ms) du thread du hook
+                // clavier est le compromis accepté pour ce chemin de repli, rare.
+                source = _selectionReader.ReadSelection(_sourceScope);
                 if (source.Length == 0)
                     throw new InvalidOperationException("Aucun texte à transformer : le champ est vide."); // le catch ci-dessous désélectionne
             }
@@ -213,7 +219,17 @@ public sealed class DonnaContext : ApplicationContext
             _pill.ShowError(ex.Message);
 
             if (usingSelectionFallback)
-                _selectionReader.Deselect();
+            {
+                try
+                {
+                    _selectionReader.Deselect();
+                }
+                catch
+                {
+                    // Best effort : ne jamais remplacer l'erreur déjà journalisée et
+                    // affichée par un second échec sur la désélection elle-même.
+                }
+            }
         }
     }
 
