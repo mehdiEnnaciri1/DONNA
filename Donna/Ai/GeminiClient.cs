@@ -20,10 +20,14 @@ public sealed class GeminiClient : IDisposable
 
     // Cadre le modèle pour qu'il ne renvoie que le résultat brut ; ResponseCleaner
     // reste un filet de sécurité par-dessus au cas où le modèle n'obéit pas.
+    // Assistant généraliste (pas seulement un correcteur de texte) : DONNA doit aussi
+    // savoir répondre à des demandes/questions (générer du code, une requête SQL,
+    // une explication...), pas juste reformuler le texte fourni.
     // Public : réutilisée telle quelle par GroqClient (même consigne, quel que soit le fournisseur).
     public const string SystemInstruction =
-        "Tu es un outil de transformation de texte intégré à un logiciel. " +
-        "Réponds UNIQUEMENT par le résultat final : sans préambule, sans " +
+        "Tu es un assistant intégré à un logiciel : tu corriges/reformules du texte et tu " +
+        "réponds à des demandes ou questions (générer du code, une requête, une explication, etc.). " +
+        "Réponds UNIQUEMENT par le résultat final demandé : sans préambule, sans " +
         "guillemets encadrants, sans bloc markdown, sans commentaire sur ta réponse.";
 
     /// <summary>
