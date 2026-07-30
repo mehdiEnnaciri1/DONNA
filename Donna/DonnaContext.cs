@@ -37,6 +37,7 @@ public sealed class DonnaContext : ApplicationContext
     private readonly ForegroundWatcher _foregroundWatcher = new();
     private readonly KeyTranslator _translator = new();
     private readonly GeminiClient _gemini = new();
+    private readonly GroqClient _groq = new();
     private readonly TextInjector _injector = new();
     private readonly NotifyIcon _trayIcon;
     private readonly PillOverlay _pill = new();
@@ -195,26 +196,47 @@ public sealed class DonnaContext : ApplicationContext
         }
     }
 
+    /// <summary>
+    /// Essaie chaque clé du trousseau à tour de rôle jusqu'à ce qu'une réponde,
+    /// en appelant Gemini ou Groq selon le fournisseur détecté pour chaque clé
+    /// (voir <see cref="AiProviderDetector"/>) — le trousseau peut mélanger des
+    /// clés de plusieurs fournisseurs. Bascule sur la clé suivante pour
+    /// n'importe quel échec (quota, clé invalide, mauvais fournisseur...), pas
+    /// seulement le quota : DONNA n'a aucune garantie a priori qu'une clé donnée
+    /// fonctionne.
+    /// </summary>
     private async Task<string> GenerateWithKeyRotationAsync(string source, string prompt)
     {
         if (_keyRing is null)
-            throw new InvalidOperationException("Aucune clé API Gemini configurée. Ouvre Réglages pour en ajouter une.");
+            throw new InvalidOperationException("Aucune clé API configurée. Ouvre Réglages pour en ajouter une.");
+
+        Exception? lastFailure = null;
 
         while (true)
         {
-            string apiKey = _keyRing.CurrentKey
-                ?? throw new InvalidOperationException("Toutes les clés API Gemini ont atteint leur quota. Réessaie plus tard ou ajoute une nouvelle clé dans Réglages.");
+            if (_keyRing.CurrentKey is not { } apiKey)
+            {
+                throw lastFailure is null
+                    ? new InvalidOperationException("Aucune clé API configurée. Ouvre Réglages pour en ajouter une.")
+                    : new InvalidOperationException(
+                        "Toutes les clés API ont échoué. Vérifie-les dans Réglages.", lastFailure);
+            }
 
             try
             {
-                return await _gemini.GenerateAsync(apiKey, _model, source, prompt);
+                return AiProviderDetector.Detect(apiKey) switch
+                {
+                    AiProvider.Groq => await _groq.GenerateAsync(apiKey, source, prompt),
+                    _ => await _gemini.GenerateAsync(apiKey, _model, source, prompt),
+                };
             }
-            catch (GeminiQuotaExceededException)
+            catch (Exception ex) when (ex is AiQuotaExceededException or AiApiException)
             {
-                _keyRing.MarkCurrentAsQuotaExceeded();
+                lastFailure = ex;
+                _keyRing.MarkCurrentAsFailed();
                 // On boucle : soit une clé suivante est disponible et on la
                 // réessaie, soit CurrentKey vaudra null et la garde du haut
-                // ci-dessus lèvera l'erreur au tour suivant.
+                // lèvera l'erreur (avec la dernière raison d'échec) au tour suivant.
             }
         }
     }
@@ -233,6 +255,7 @@ public sealed class DonnaContext : ApplicationContext
             _mouseHook.Dispose();
             _foregroundWatcher.Dispose();
             _gemini.Dispose();
+            _groq.Dispose();
             _trayIcon.Dispose();
             _pill.Dispose();
         }

@@ -23,7 +23,7 @@ public class KeyRingTests
     public void Rotation_sur_quota_passe_a_la_cle_suivante()
     {
         var ring = new KeyRing(["clé-A", "clé-B"]);
-        var suivante = ring.MarkCurrentAsQuotaExceeded();
+        var suivante = ring.MarkCurrentAsFailed();
 
         Assert.Equal("clé-B", suivante);
         Assert.Equal("clé-B", ring.CurrentKey);
@@ -34,8 +34,8 @@ public class KeyRingTests
     {
         var ring = new KeyRing(["clé-A", "clé-B", "clé-C"]);
 
-        Assert.Equal("clé-B", ring.MarkCurrentAsQuotaExceeded());
-        Assert.Equal("clé-C", ring.MarkCurrentAsQuotaExceeded());
+        Assert.Equal("clé-B", ring.MarkCurrentAsFailed());
+        Assert.Equal("clé-C", ring.MarkCurrentAsFailed());
     }
 
     [Fact]
@@ -43,7 +43,7 @@ public class KeyRingTests
     {
         var ring = new KeyRing(["clé-unique"]);
 
-        var suivante = ring.MarkCurrentAsQuotaExceeded();
+        var suivante = ring.MarkCurrentAsFailed();
 
         Assert.Null(suivante);
         Assert.Null(ring.CurrentKey);
@@ -55,8 +55,8 @@ public class KeyRingTests
     {
         var ring = new KeyRing(["clé-A", "clé-B"]);
 
-        ring.MarkCurrentAsQuotaExceeded(); // A épuisée → passe à B
-        var apresB = ring.MarkCurrentAsQuotaExceeded(); // B épuisée → plus rien
+        ring.MarkCurrentAsFailed(); // A épuisée → passe à B
+        var apresB = ring.MarkCurrentAsFailed(); // B épuisée → plus rien
 
         Assert.Null(apresB);
         Assert.True(ring.IsExhausted);
@@ -67,9 +67,9 @@ public class KeyRingTests
     {
         var ring = new KeyRing(["clé-A", "clé-B", "clé-C"]);
 
-        ring.MarkCurrentAsQuotaExceeded(); // A épuisée → B courante
-        ring.MarkCurrentAsQuotaExceeded(); // B épuisée → C courante
-        var apresC = ring.MarkCurrentAsQuotaExceeded(); // C épuisée → plus rien
+        ring.MarkCurrentAsFailed(); // A épuisée → B courante
+        ring.MarkCurrentAsFailed(); // B épuisée → C courante
+        var apresC = ring.MarkCurrentAsFailed(); // C épuisée → plus rien
 
         Assert.Null(apresC);
         Assert.True(ring.IsExhausted);
