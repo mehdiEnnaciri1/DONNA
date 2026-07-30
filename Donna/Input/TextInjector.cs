@@ -1,127 +1,57 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
-using System.Windows.Forms;
 
 namespace Donna.Input;
 
 /// <summary>
-/// Efface la formule tapée (N Backspace) puis colle la réponse via Ctrl+V,
-/// sans jamais voler le focus : <see cref="SendInput"/> injecte dans la
-/// fenêtre qui a déjà le focus, on ne touche à aucune API d'activation de
-/// fenêtre. Voir ARCHITECTURE.md §7.3 : « gérer aussi le presse-papiers et le
-/// timing des SendInput ».
+/// Efface la formule tapée (N Backspace) puis injecte la réponse caractère par
+/// caractère via <see cref="SendInput"/> en frappe Unicode (KEYEVENTF_UNICODE) —
+/// jamais via le presse-papiers, qui n'est ni lu ni modifié.
+///
+/// Backspace et caractères sont envoyés en UN SEUL appel <see cref="SendInput"/> :
+/// Windows garantit alors que toute la séquence est traitée dans l'ordre, sans
+/// entrelacement avec la frappe réelle de l'utilisateur. C'est ce qui remplace
+/// l'ancienne approche Ctrl+V + presse-papiers, dont le collage (asynchrone)
+/// pouvait arriver après la restauration du presse-papiers — collant alors un
+/// contenu périmé ou celui de l'utilisateur, sans qu'aucun délai ne puisse
+/// corriger la course de façon fiable.
+///
+/// Ne vole jamais le focus : SendInput injecte dans la fenêtre qui a déjà le
+/// focus, on ne touche à aucune API d'activation de fenêtre.
 /// </summary>
 public sealed class TextInjector
 {
     private const ushort VK_BACK = 0x08;
-    private const ushort VK_CONTROL = 0x11;
-    private const ushort VK_V = 0x56;
 
     private const uint INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const uint KEYEVENTF_UNICODE = 0x0004;
 
-    /// <summary>
-    /// Délai avant de restaurer le presse-papiers : Ctrl+V est asynchrone
-    /// (SendInput ne fait que déposer l'évènement dans la file d'entrée), donc
-    /// si on restaure trop vite, l'application cible peut lire l'ANCIEN
-    /// contenu au lieu de notre réponse. Deviendra réglable via
-    /// SettingsForm/AppConfig (onglet Avancé, cf. ARCHITECTURE.md §5 Ui/).
-    /// </summary>
-    public int PasteRestoreDelayMs { get; set; } = 150;
-
-    /// <summary>Efface les <paramref name="charsToDelete"/> derniers caractères puis colle <paramref name="replacementText"/>.</summary>
+    /// <summary>Efface les <paramref name="charsToDelete"/> derniers caractères puis injecte <paramref name="replacementText"/>.</summary>
     public void Replace(int charsToDelete, string replacementText)
     {
-        SendBackspaces(charsToDelete);
+        int backspaceCount = Math.Max(0, charsToDelete);
+        var inputs = new INPUT[backspaceCount * 2 + replacementText.Length * 2];
+        int i = 0;
 
-        if (!string.IsNullOrEmpty(replacementText))
-            PasteViaClipboard(replacementText);
-    }
-
-    private static void SendBackspaces(int count)
-    {
-        if (count <= 0)
-            return;
-
-        var inputs = new INPUT[count * 2];
-        for (int i = 0; i < count; i++)
+        for (int b = 0; b < backspaceCount; b++)
         {
-            inputs[i * 2] = KeyInput(VK_BACK, keyUp: false);
-            inputs[i * 2 + 1] = KeyInput(VK_BACK, keyUp: true);
+            inputs[i++] = KeyInput(VK_BACK, keyUp: false);
+            inputs[i++] = KeyInput(VK_BACK, keyUp: true);
         }
 
-        SendInputChecked(inputs);
-    }
-
-    private void PasteViaClipboard(string text)
-    {
-        string? previousClipboard = TrySaveClipboard();
-
-        try
+        // On itère sur les `char` (unités UTF-16), pas sur les points de code : un
+        // caractère hors du Plan de base (émoji...) occupe deux `char` consécutifs
+        // (paire de substitution), chacun devient naturellement un évènement Unicode
+        // distinct — SendInput/Windows recombine la paire côté application cible.
+        foreach (char c in replacementText)
         {
-            TrySetClipboardText(text);
-            SendCtrlV();
-
-            // Laisse le temps à l'application cible de lire le presse-papiers
-            // avant qu'on le restaure (cf. commentaire sur PasteRestoreDelayMs).
-            Thread.Sleep(PasteRestoreDelayMs);
-        }
-        finally
-        {
-            TryRestoreClipboard(previousClipboard);
-        }
-    }
-
-    private static void SendCtrlV()
-    {
-        SendInputChecked(
-        [
-            KeyInput(VK_CONTROL, keyUp: false),
-            KeyInput(VK_V, keyUp: false),
-            KeyInput(VK_V, keyUp: true),
-            KeyInput(VK_CONTROL, keyUp: true),
-        ]);
-    }
-
-    // Le presse-papiers Windows est un ressource partagée notoirement capricieuse
-    // (peut être brièvement verrouillé par un autre processus — visionneur du
-    // presse-papiers, gestionnaire de copier-coller, etc.) : on retente plutôt
-    // que d'échouer bruyamment pour une opération qui n'est pas critique.
-    // On ne sauvegarde/restaure QUE le texte (pas l'IDataObject complet) :
-    // Clipboard.SetDataObject() avec un IDataObject OLE complexe provenant
-    // d'une autre appli peut lever des exceptions de mismatch de type au
-    // moment du rendu des formats, hors du contrôle des retries ci-dessus.
-    private static string? TrySaveClipboard()
-    {
-        return TryClipboardOperation(() => Clipboard.ContainsText() ? Clipboard.GetText() : null);
-    }
-
-    private static void TrySetClipboardText(string text)
-    {
-        TryClipboardOperation<object?>(() => { Clipboard.SetText(text); return null; });
-    }
-
-    private static void TryRestoreClipboard(string? previousClipboard)
-    {
-        if (!string.IsNullOrEmpty(previousClipboard))
-            TryClipboardOperation<object?>(() => { Clipboard.SetText(previousClipboard); return null; });
-    }
-
-    private static T? TryClipboardOperation<T>(Func<T?> operation, int maxAttempts = 20, int delayMs = 50)
-    {
-        for (int attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            try
-            {
-                return operation();
-            }
-            catch (ExternalException) when (attempt < maxAttempts)
-            {
-                Thread.Sleep(delayMs);
-            }
+            inputs[i++] = UnicodeKeyInput(c, keyUp: false);
+            inputs[i++] = UnicodeKeyInput(c, keyUp: true);
         }
 
-        return default;
+        if (inputs.Length > 0)
+            SendInputChecked(inputs);
     }
 
     private static void SendInputChecked(INPUT[] inputs)
@@ -140,6 +70,27 @@ public sealed class TextInjector
             {
                 wVk = vk,
                 dwFlags = keyUp ? KEYEVENTF_KEYUP : 0,
+            },
+        },
+    };
+
+    // Frappe Unicode : wVk = 0, wScan = l'unité UTF-16 elle-même, KEYEVENTF_UNICODE.
+    // Windows synthétise le WM_CHAR correspondant sans passer par une disposition
+    // clavier — fonctionne pour n'importe quel caractère (accents, émoji...), même
+    // absent du clavier physique actif. LLKHF_INJECTED est posé par Windows sur ces
+    // évènements exactement comme pour un SendInput classique (vérifié via
+    // KeyEvent.IsInjected, voir KeyboardHook), donc KeyboardHook les ignore bien
+    // et ne pollue pas le buffer de frappe de DONNA.
+    private static INPUT UnicodeKeyInput(char c, bool keyUp) => new()
+    {
+        type = INPUT_KEYBOARD,
+        u = new InputUnion
+        {
+            ki = new KEYBDINPUT
+            {
+                wVk = 0,
+                wScan = c,
+                dwFlags = KEYEVENTF_UNICODE | (keyUp ? KEYEVENTF_KEYUP : 0),
             },
         },
     };

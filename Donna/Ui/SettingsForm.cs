@@ -19,7 +19,6 @@ public sealed class SettingsForm : Form
     private readonly TextBox _triggerWordTextBox;
     private readonly CheckBox _autostartCheckBox;
     private readonly ComboBox _modelComboBox;
-    private readonly NumericUpDown _pasteDelayNumericUpDown;
     private readonly CheckBox _logsEnabledCheckBox;
 
     /// <param name="config">Config actuelle à refléter dans les champs.</param>
@@ -34,11 +33,20 @@ public sealed class SettingsForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(420, 320);
 
-        var buttonPanel = new Panel { Dock = DockStyle.Bottom, Height = 44 };
+        // Positionnement explicite (pas de Dock) pour le panneau de boutons et les tabs :
+        // Dock=Bottom/Fill s'est révélé peu fiable ici (bouton invisible malgré un ordre
+        // d'ajout correct) — des bornes Location/Size non superposées lèvent toute ambiguïté.
+        const int buttonPanelHeight = 44;
+        var buttonPanel = new Panel
+        {
+            Location = new Point(0, 320 - buttonPanelHeight),
+            Size = new Size(420, buttonPanelHeight),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+        };
         var okButton = new Button
         {
-            Text = "OK", DialogResult = DialogResult.OK,
-            Location = new Point(228, 8), Width = 90,
+            Text = "Enregistrer", DialogResult = DialogResult.OK,
+            Location = new Point(208, 8), Width = 110,
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
         var cancelButton = new Button
@@ -50,7 +58,12 @@ public sealed class SettingsForm : Form
         buttonPanel.Controls.Add(okButton);
         buttonPanel.Controls.Add(cancelButton);
 
-        var tabs = new TabControl { Dock = DockStyle.Fill };
+        var tabs = new TabControl
+        {
+            Location = new Point(0, 0),
+            Size = new Size(420, 320 - buttonPanelHeight),
+            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+        };
 
         var apiKeysTab = new TabPage("Clés API");
         var apiKeysLabel = new Label
@@ -105,37 +118,23 @@ public sealed class SettingsForm : Form
         generalTab.Controls.AddRange([triggerLabel, _triggerWordTextBox, _autostartCheckBox, modelLabel, _modelComboBox]);
 
         var advancedTab = new TabPage("Avancé");
-        var delayLabel = new Label { Text = "Délai avant collage (ms) :", AutoSize = true, Location = new Point(12, 22) };
-        _pasteDelayNumericUpDown = new NumericUpDown
-        {
-            Location = new Point(190, 19),
-            Width = 80,
-            Minimum = 0,
-            Maximum = 5000,
-            Increment = 10,
-            Value = config.PasteRestoreDelayMs,
-        };
         _logsEnabledCheckBox = new CheckBox
         {
             Text = "Activer les logs (diagnostic)",
             AutoSize = true,
-            Location = new Point(12, 58),
+            Location = new Point(12, 22),
             Checked = config.LogsEnabled,
         };
         var keyboardLayoutLabel = new Label
         {
             Text = "Disposition clavier : détectée automatiquement selon la fenêtre active.",
-            Location = new Point(12, 94),
+            Location = new Point(12, 58),
             Size = new Size(380, 40),
         };
-        advancedTab.Controls.AddRange([delayLabel, _pasteDelayNumericUpDown, _logsEnabledCheckBox, keyboardLayoutLabel]);
+        advancedTab.Controls.AddRange([_logsEnabledCheckBox, keyboardLayoutLabel]);
 
         tabs.TabPages.AddRange([apiKeysTab, generalTab, advancedTab]);
 
-        // Ordre important : en WinForms, le DERNIER contrôle ajouté est ancré EN PREMIER.
-        // tabs (Dock=Fill) doit donc être ajouté avant buttonPanel (Dock=Bottom), sinon
-        // Fill réserve tout l'espace avant que Bottom ait pu prendre sa tranche → le
-        // bandeau de boutons se retrouve écrasé à 0 pixel de hauteur, invisible.
         Controls.Add(tabs);
         Controls.Add(buttonPanel);
 
@@ -156,7 +155,6 @@ public sealed class SettingsForm : Form
     {
         TriggerWord = string.IsNullOrWhiteSpace(_triggerWordTextBox.Text) ? "donna" : _triggerWordTextBox.Text.Trim(),
         Model = string.IsNullOrWhiteSpace(_modelComboBox.Text) ? "gemini-2.5-flash" : _modelComboBox.Text.Trim(),
-        PasteRestoreDelayMs = (int)_pasteDelayNumericUpDown.Value,
         LogsEnabled = _logsEnabledCheckBox.Checked,
     };
 }

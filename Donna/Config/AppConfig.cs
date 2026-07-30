@@ -15,9 +15,6 @@ public sealed class AppConfig
     /// <summary>Modèle Gemini utilisé pour la génération.</summary>
     public string Model { get; set; } = "gemini-2.5-flash";
 
-    /// <summary>Délai (ms) avant de restaurer le presse-papiers après le collage — voir TextInjector.</summary>
-    public int PasteRestoreDelayMs { get; set; } = 150;
-
-    /// <summary>Active des logs de diagnostic (pas encore implémentés — réglage sans effet pour l'instant).</summary>
+    /// <summary>Active la journalisation de diagnostic dans %APPDATA%\Donna\logs\donna.log — voir DiagnosticLog.</summary>
     public bool LogsEnabled { get; set; }
 }

@@ -30,7 +30,6 @@ public class ConfigStoreTests
                 EncryptedApiKeys = ["blob-chiffre-1", "blob-chiffre-2"],
                 TriggerWord = "assistant",
                 Model = "gemini-flash-latest",
-                PasteRestoreDelayMs = 300,
                 LogsEnabled = true,
             };
 
@@ -40,7 +39,6 @@ public class ConfigStoreTests
             Assert.Equal(original.EncryptedApiKeys, reloaded.EncryptedApiKeys);
             Assert.Equal(original.TriggerWord, reloaded.TriggerWord);
             Assert.Equal(original.Model, reloaded.Model);
-            Assert.Equal(original.PasteRestoreDelayMs, reloaded.PasteRestoreDelayMs);
             Assert.Equal(original.LogsEnabled, reloaded.LogsEnabled);
         }
         finally
