@@ -37,19 +37,9 @@ public class GeminiClientTests
     }
 
     [Fact]
-    public void IsQuotaExceeded_detecte_le_format_code_string_observe_en_direct()
+    public void IsQuotaExceeded_faux_pour_erreur_invalid_argument()
     {
-        // Format réellement renvoyé par l'API Interactions (vérifié le 28/07/2026),
-        // différent du format "status" façon Google classique.
-        const string body = """{ "error": { "message": "quota", "code": "resource_exhausted" } }""";
-        Assert.True(GeminiClient.IsQuotaExceeded(body));
-    }
-
-    [Fact]
-    public void IsQuotaExceeded_faux_pour_erreur_invalid_request_reelle()
-    {
-        // Erreur 400 réellement observée en direct pour une requête mal formée.
-        const string body = """{ "error": { "message": "Request contains an invalid argument.", "code": "invalid_request" } }""";
+        const string body = """{ "error": { "code": 400, "message": "Request contains an invalid argument.", "status": "INVALID_ARGUMENT" } }""";
         Assert.False(GeminiClient.IsQuotaExceeded(body));
     }
 
@@ -67,20 +57,21 @@ public class GeminiClientTests
     }
 
     [Fact]
-    public void ExtractOutputText_lit_output_text()
+    public void IsQuotaExceeded_faux_pour_racine_de_type_tableau()
     {
-        const string body = """{ "id": "1", "output_text": "Bonjour tout le monde" }""";
-        Assert.Equal("Bonjour tout le monde", GeminiClient.ExtractOutputText(body));
+        // Format observé pour certaines erreurs d'infrastructure Google (mauvais
+        // endpoint, etc.) : tableau à la racine au lieu d'un objet — ne doit jamais planter.
+        const string body = """[ { "error": { "code": 401, "message": "unauthenticated", "status": "UNAUTHENTICATED" } } ]""";
+        Assert.False(GeminiClient.IsQuotaExceeded(body));
     }
 
     [Fact]
-    public void ExtractOutputText_repli_sur_steps_si_output_text_absent()
+    public void ExtractOutputText_lit_candidates_content_parts_text()
     {
         const string body = """
         {
-          "id": "1",
-          "steps": [
-            { "type": "model_output", "content": [ { "text": "Bonjour " }, { "text": "tout le monde" } ] }
+          "candidates": [
+            { "content": { "parts": [ { "text": "Bonjour " }, { "text": "tout le monde" } ], "role": "model" } }
           ]
         }
         """;
@@ -90,7 +81,7 @@ public class GeminiClientTests
     [Fact]
     public void ExtractOutputText_leve_si_rien_d_exploitable()
     {
-        const string body = """{ "id": "1", "status": "completed" }""";
-        Assert.Throws<GeminiApiException>(() => GeminiClient.ExtractOutputText(body));
+        const string body = """{ "candidates": [] }""";
+        Assert.Throws<AiApiException>(() => GeminiClient.ExtractOutputText(body));
     }
 }

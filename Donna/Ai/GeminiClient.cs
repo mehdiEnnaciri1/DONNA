@@ -6,18 +6,22 @@ using System.Text.Json;
 namespace Donna.Ai;
 
 /// <summary>
-/// Appel REST vers l'API Gemini « Interactions » (v1beta/interactions),
-/// qui remplace progressivement l'ancienne API generateContent — voir
-/// ARCHITECTURE.md §7 point 4 : à revérifier si Google fait encore évoluer
-/// le format, cette API a été introduite courant 2026.
+/// Appel REST vers l'API publique Gemini <c>generateContent</c> — la seule
+/// des deux API Gemini de Google qui accepte une simple clé API
+/// (<c>x-goog-api-key</c>). L'API « Interactions »
+/// (<c>v1beta/interactions</c>) utilisée avant exige un token OAuth2 complet
+/// (401 <c>ACCESS_TOKEN_TYPE_UNSUPPORTED</c> avec une clé API — vérifié en
+/// conditions réelles le 28/07/2026), incompatible avec un outil grand public
+/// qui ne stocke qu'une clé API.
 /// </summary>
 public sealed class GeminiClient : IDisposable
 {
-    private const string Endpoint = "https://generativelanguage.googleapis.com/v1beta/interactions";
+    private const string EndpointTemplate = "https://generativelanguage.googleapis.com/v1beta/models/{0}:generateContent";
 
     // Cadre le modèle pour qu'il ne renvoie que le résultat brut ; ResponseCleaner
     // reste un filet de sécurité par-dessus au cas où le modèle n'obéit pas.
-    private const string SystemInstruction =
+    // Public : réutilisée telle quelle par GroqClient (même consigne, quel que soit le fournisseur).
+    public const string SystemInstruction =
         "Tu es un outil de transformation de texte intégré à un logiciel. " +
         "Réponds UNIQUEMENT par le résultat final : sans préambule, sans " +
         "guillemets encadrants, sans bloc markdown, sans commentaire sur ta réponse.";
@@ -48,7 +52,7 @@ public sealed class GeminiClient : IDisposable
 
     /// <summary>
     /// Envoie <paramref name="source"/> + <paramref name="prompt"/> à Gemini et
-    /// renvoie le texte généré. Lève <see cref="GeminiQuotaExceededException"/>
+    /// renvoie le texte généré. Lève <see cref="AiQuotaExceededException"/>
     /// si la clé a atteint son quota (à charge de l'appelant de faire tourner
     /// le <see cref="Donna.Config.KeyRing"/> et de réessayer).
     /// </summary>
@@ -60,13 +64,13 @@ public sealed class GeminiClient : IDisposable
         if (string.IsNullOrWhiteSpace(model))
             throw new ArgumentException("Le modèle ne peut pas être vide.", nameof(model));
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint);
+        string endpoint = string.Format(EndpointTemplate, model);
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
         request.Headers.Add("x-goog-api-key", apiKey);
         request.Content = JsonContent.Create(new
         {
-            model,
-            system_instruction = SystemInstruction,
-            input = BuildInput(source, prompt),
+            systemInstruction = new { parts = new[] { new { text = SystemInstruction } } },
+            contents = new[] { new { parts = new[] { new { text = BuildInput(source, prompt) } } } },
         });
 
         using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
@@ -75,9 +79,9 @@ public sealed class GeminiClient : IDisposable
         if (!response.IsSuccessStatusCode)
         {
             if (response.StatusCode == HttpStatusCode.TooManyRequests || IsQuotaExceeded(body))
-                throw new GeminiQuotaExceededException(body);
+                throw new AiQuotaExceededException(body);
 
-            throw new GeminiApiException((int)response.StatusCode, body);
+            throw new AiApiException((int)response.StatusCode, body);
         }
 
         return ExtractOutputText(body);
@@ -101,23 +105,32 @@ public sealed class GeminiClient : IDisposable
     }
 
     /// <summary>
-    /// Détecte une erreur de quota dans le corps JSON d'une réponse d'erreur.
-    /// Vérifié en direct le 28/07/2026 : l'API Interactions renvoie
-    /// <c>{ "error": { "code": "invalid_request", "message": "..." } }</c> — un
-    /// <c>code</c> en string, façon OpenAI, PAS le <c>status</c> enum de
-    /// l'ancienne convention Google ({"status":"RESOURCE_EXHAUSTED"}, encore
-    /// documentée ailleurs). On vérifie les deux formats par prudence : cette
-    /// API est jeune et peut encore changer (voir ARCHITECTURE.md §7.4). Le
-    /// signal le plus fiable reste de toute façon le code HTTP 429 lui-même,
-    /// déjà vérifié dans <see cref="GenerateAsync"/> avant d'appeler cette méthode.
+    /// Détecte une erreur de quota dans le corps JSON d'une réponse d'erreur :
+    /// <c>{ "error": { "code": 429, "message": "...", "status": "RESOURCE_EXHAUSTED" } }</c>,
+    /// le format d'erreur standard de l'API Google. Le signal le plus fiable
+    /// reste de toute façon le code HTTP 429 lui-même, déjà vérifié dans
+    /// <see cref="GenerateAsync"/> avant d'appeler cette méthode — ceci couvre
+    /// le cas où le quota est signalé dans le corps sans statut HTTP 429.
     /// </summary>
     public static bool IsQuotaExceeded(string responseJson)
     {
         try
         {
             using var doc = JsonDocument.Parse(responseJson);
-            if (!doc.RootElement.TryGetProperty("error", out var error))
+            JsonElement root = doc.RootElement;
+
+            // Certaines erreurs d'infrastructure Google (ex. URL invalide) renvoient un
+            // tableau à la racine (`[{ "error": {...} }]`) au lieu d'un objet — à ne
+            // jamais supposer, TryGetProperty plante sur un ValueKind autre que Object.
+            JsonElement errorHolder = root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0
+                ? root[0]
+                : root;
+
+            if (errorHolder.ValueKind != JsonValueKind.Object || !errorHolder.TryGetProperty("error", out var error)
+                || error.ValueKind != JsonValueKind.Object)
+            {
                 return false;
+            }
 
             if (error.TryGetProperty("status", out var status)
                 && status.GetString() == "RESOURCE_EXHAUSTED")
@@ -141,48 +154,35 @@ public sealed class GeminiClient : IDisposable
         }
     }
 
-    /// <summary>Extrait le texte généré d'une réponse JSON de l'API Interactions.</summary>
+    /// <summary>
+    /// Extrait le texte généré d'une réponse <c>generateContent</c> :
+    /// <c>candidates[0].content.parts[].text</c> (plusieurs parts si la
+    /// réponse est découpée, concaténées dans l'ordre).
+    /// </summary>
     public static string ExtractOutputText(string responseJson)
     {
         using var doc = JsonDocument.Parse(responseJson);
         var root = doc.RootElement;
 
-        // "output_text" n'apparaît PAS dans la réponse REST brute (vérifié en
-        // direct le 28/07/2026) — c'est un confort ajouté par les SDK officiels.
-        // On le garde en priorité si jamais Google l'ajoute un jour côté REST,
-        // mais le vrai chemin est steps[].content[].text ci-dessous.
-        if (root.TryGetProperty("output_text", out var outputText)
-            && outputText.ValueKind == JsonValueKind.String
-            && !string.IsNullOrEmpty(outputText.GetString()))
-        {
-            return outputText.GetString()!;
-        }
-
-        // Chemin réel : reconstruit le texte à partir des steps de type
-        // "model_output" (on ignore les steps "thought" et autres).
-        if (root.TryGetProperty("steps", out var steps) && steps.ValueKind == JsonValueKind.Array)
+        if (root.TryGetProperty("candidates", out var candidates)
+            && candidates.ValueKind == JsonValueKind.Array
+            && candidates.GetArrayLength() > 0
+            && candidates[0].TryGetProperty("content", out var content)
+            && content.TryGetProperty("parts", out var parts)
+            && parts.ValueKind == JsonValueKind.Array)
         {
             var sb = new StringBuilder();
-            foreach (var step in steps.EnumerateArray())
+            foreach (var part in parts.EnumerateArray())
             {
-                if (step.TryGetProperty("type", out var stepType) && stepType.GetString() != "model_output")
-                    continue;
-
-                if (!step.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
-                    continue;
-
-                foreach (var part in content.EnumerateArray())
-                {
-                    if (part.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
-                        sb.Append(text.GetString());
-                }
+                if (part.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
+                    sb.Append(text.GetString());
             }
 
             if (sb.Length > 0)
                 return sb.ToString();
         }
 
-        throw new GeminiApiException(0, $"Réponse Gemini inattendue, impossible d'en extraire le texte : {responseJson}");
+        throw new AiApiException(0, $"Réponse Gemini inattendue, impossible d'en extraire le texte : {responseJson}");
     }
 
     public void Dispose()
@@ -190,18 +190,4 @@ public sealed class GeminiClient : IDisposable
         if (_ownsHttpClient)
             _http.Dispose();
     }
-}
-
-/// <summary>Erreur API Gemini non liée au quota (requête invalide, panne serveur, etc.).</summary>
-public sealed class GeminiApiException(int statusCode, string responseBody)
-    : Exception($"Erreur API Gemini ({statusCode}) : {responseBody}")
-{
-    public int StatusCode { get; } = statusCode;
-}
-
-/// <summary>La clé API utilisée a atteint son quota — à faire tourner via KeyRing.</summary>
-public sealed class GeminiQuotaExceededException(string responseBody)
-    : Exception("Quota Gemini dépassé pour cette clé API.")
-{
-    public string ResponseBody { get; } = responseBody;
 }
