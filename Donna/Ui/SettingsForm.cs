@@ -1,4 +1,5 @@
 using Donna.Config;
+using Donna.Input;
 
 namespace Donna.Ui;
 
@@ -19,6 +20,8 @@ public sealed class SettingsForm : Form
     private readonly TextBox _triggerWordTextBox;
     private readonly CheckBox _autostartCheckBox;
     private readonly ComboBox _modelComboBox;
+    private readonly RadioButton _sourceScopeLineRadio;
+    private readonly RadioButton _sourceScopeAllRadio;
     private readonly CheckBox _logsEnabledCheckBox;
 
     /// <param name="config">Config actuelle à refléter dans les champs.</param>
@@ -115,7 +118,32 @@ public sealed class SettingsForm : Form
             "gemini-pro-latest",
         ]);
         _modelComboBox.Text = config.Model;
-        generalTab.Controls.AddRange([triggerLabel, _triggerWordTextBox, _autostartCheckBox, modelLabel, _modelComboBox]);
+
+        var sourceScopeLabel = new Label
+        {
+            Text = "Portée de la source quand rien n'est tapé :",
+            AutoSize = true,
+            Location = new Point(12, 130),
+        };
+        _sourceScopeLineRadio = new RadioButton
+        {
+            Text = "Ligne (défaut, sûr)",
+            AutoSize = true,
+            Location = new Point(24, 154),
+            Checked = config.SourceScope == SourceScope.Line,
+        };
+        _sourceScopeAllRadio = new RadioButton
+        {
+            Text = "Tout avant le curseur (pour du code collé multi-ligne)",
+            AutoSize = true,
+            Location = new Point(24, 178),
+            Checked = config.SourceScope == SourceScope.AllBeforeCursor,
+        };
+
+        generalTab.Controls.AddRange([
+            triggerLabel, _triggerWordTextBox, _autostartCheckBox, modelLabel, _modelComboBox,
+            sourceScopeLabel, _sourceScopeLineRadio, _sourceScopeAllRadio,
+        ]);
 
         var advancedTab = new TabPage("Avancé");
         _logsEnabledCheckBox = new CheckBox
@@ -155,6 +183,7 @@ public sealed class SettingsForm : Form
     {
         TriggerWord = string.IsNullOrWhiteSpace(_triggerWordTextBox.Text) ? "donna" : _triggerWordTextBox.Text.Trim(),
         Model = string.IsNullOrWhiteSpace(_modelComboBox.Text) ? "gemini-2.5-flash" : _modelComboBox.Text.Trim(),
+        SourceScope = _sourceScopeAllRadio.Checked ? SourceScope.AllBeforeCursor : SourceScope.Line,
         LogsEnabled = _logsEnabledCheckBox.Checked,
     };
 }

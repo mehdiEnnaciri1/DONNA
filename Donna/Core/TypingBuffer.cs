@@ -93,7 +93,12 @@ public sealed class TypingBuffer
         // La formule complète à effacer = tout ce que DONNA a tapé (= tout le buffer).
         // On n'efface JAMAIS plus que notre propre buffer → le texte préexistant du
         // champ (chargé d'un brouillon, etc.) reste intact.
-        return new TriggerMatch(source, prompt, _buffer.Length);
+        // TriggerLength = uniquement la partie déclencheur + prompt + 2 espaces (sans
+        // la source) — sert au repli par sélection (DonnaContext) quand la source
+        // tapée est vide : on n'efface alors QUE ce que l'utilisateur vient de taper,
+        // jamais le texte réel (collé ou préexistant) qu'on va lire par ailleurs.
+        int triggerLength = _buffer.Length - triggerStart;
+        return new TriggerMatch(source, prompt, _buffer.Length, triggerLength);
     }
 
     /// <summary>
@@ -126,7 +131,8 @@ public sealed class TypingBuffer
 }
 
 /// <summary>Résultat d'une formule complétée.</summary>
-/// <param name="Source">Texte source à transformer (peut être vide → génération pure).</param>
+/// <param name="Source">Texte source à transformer (peut être vide → repli par sélection, voir DonnaContext).</param>
 /// <param name="Prompt">Instruction pour Gemini (peut être vide → action par défaut).</param>
-/// <param name="CharsToDelete">Nombre de Backspace à envoyer avant de coller la réponse.</param>
-public readonly record struct TriggerMatch(string Source, string Prompt, int CharsToDelete);
+/// <param name="CharsToDelete">Backspace pour effacer TOUTE la formule (source + déclencheur + prompt + 2 espaces) — chemin normal, quand la source a été tapée.</param>
+/// <param name="TriggerLength">Backspace pour effacer SEULEMENT déclencheur + prompt + 2 espaces (sans la source) — chemin de repli, quand la source est vide.</param>
+public readonly record struct TriggerMatch(string Source, string Prompt, int CharsToDelete, int TriggerLength);

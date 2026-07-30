@@ -39,12 +39,14 @@ public sealed class DonnaContext : ApplicationContext
     private readonly GeminiClient _gemini = new();
     private readonly GroqClient _groq = new();
     private readonly TextInjector _injector = new();
+    private readonly SelectionReader _selectionReader = new();
     private readonly NotifyIcon _trayIcon;
     private readonly PillOverlay _pill = new();
 
     private TypingBuffer _buffer;
     private KeyRing? _keyRing;
     private string _model;
+    private SourceScope _sourceScope;
 
     public DonnaContext()
     {
@@ -52,6 +54,7 @@ public sealed class DonnaContext : ApplicationContext
 
         _buffer = new TypingBuffer(config.TriggerWord);
         _model = config.Model;
+        _sourceScope = config.SourceScope;
         _keyRing = TryCreateKeyRing(config);
         DiagnosticLog.Enabled = config.LogsEnabled;
 
@@ -111,14 +114,16 @@ public sealed class DonnaContext : ApplicationContext
         // Applique les nouveaux réglages sans redémarrer DONNA.
         _buffer = new TypingBuffer(updated.TriggerWord);
         _model = updated.Model;
+        _sourceScope = updated.SourceScope;
         _keyRing = TryCreateKeyRing(updated);
         DiagnosticLog.Enabled = updated.LogsEnabled;
     }
 
     private void OnKeyDown(KeyEvent evt)
     {
-        // Ignore les touches injectées par TextInjector lui-même (ses propres
-        // Backspace/Ctrl+V repassent par ce même hook) — sinon boucle de rétroaction.
+        // Ignore les touches injectées par TextInjector/SelectionReader eux-mêmes
+        // (leurs propres Backspace, frappes Unicode, Maj/Ctrl+Origine, Ctrl+C, Fin
+        // repassent par ce même hook) — sinon boucle de rétroaction et pollution du buffer.
         if (evt.IsInjected)
             return;
 
@@ -166,20 +171,49 @@ public sealed class DonnaContext : ApplicationContext
         // UI. Rester sur le contexte de synchronisation WinForms garantit qu'on
         // y reprend après l'appel réseau, pas sur un thread du pool.
         _pill.ShowSending();
+
+        // TypingBuffer ne voit ni le texte collé (Ctrl+V réinitialise le buffer par
+        // prudence) ni le texte déjà présent dans le champ avant que DONNA démarre.
+        // Repli : source vide → on efface juste ce qu'on vient de taper (le
+        // déclencheur + l'instruction), puis on lit le texte réel par sélection +
+        // copie (SelectionReader) plutôt que d'appeler l'IA avec une source vide.
+        bool usingSelectionFallback = trigger.Source.Length == 0;
+
         try
         {
-            string reply = await GenerateWithKeyRotationAsync(trigger.Source, trigger.Prompt);
+            string source = trigger.Source;
+
+            if (usingSelectionFallback)
+            {
+                _injector.Replace(trigger.TriggerLength, "");
+
+                source = await Task.Run(() => _selectionReader.ReadSelection(_sourceScope));
+                if (source.Length == 0)
+                    throw new InvalidOperationException("Aucun texte à transformer : le champ est vide."); // le catch ci-dessous désélectionne
+            }
+
+            string reply = await GenerateWithKeyRotationAsync(source, trigger.Prompt);
             string cleaned = ResponseCleaner.Clean(reply);
-            _injector.Replace(trigger.CharsToDelete, cleaned);
+
+            // Repli : la sélection Ctrl+C est encore active, la 1re frappe la
+            // remplace — pas de Backspace à envoyer. Chemin normal : on efface
+            // toute la formule tapée avant d'injecter, comme avant.
+            _injector.Replace(usingSelectionFallback ? 0 : trigger.CharsToDelete, cleaned);
             _pill.ShowSuccess();
         }
         catch (Exception ex)
         {
-            // Échec (quota, réseau, clé invalide...) : on n'efface RIEN. La formule
-            // tapée par l'utilisateur reste visible à l'écran — il ne perd jamais
-            // son texte, il peut juste retaper les deux espaces pour réessayer.
+            // Échec (quota, réseau, clé invalide, lecture de la sélection...) : on
+            // ne détruit jamais le texte réel de l'utilisateur. Chemin normal : on
+            // n'efface rien, la formule tapée reste visible. Repli sélection : le
+            // déclencheur tapé a déjà été effacé plus haut (nécessaire pour pouvoir
+            // sélectionner le texte réel) ; on désélectionne juste proprement pour
+            // que ce texte réel reste intact et visible, sans rien y coller.
             DiagnosticLog.LogException(ex);
             _pill.ShowError(ex.Message);
+
+            if (usingSelectionFallback)
+                _selectionReader.Deselect();
         }
     }
 

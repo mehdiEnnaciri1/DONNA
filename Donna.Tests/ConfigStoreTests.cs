@@ -1,4 +1,5 @@
 using Donna.Config;
+using Donna.Input;
 using Xunit;
 
 namespace Donna.Tests;
@@ -16,6 +17,7 @@ public class ConfigStoreTests
 
         Assert.Equal("donna", config.TriggerWord);
         Assert.Empty(config.EncryptedApiKeys);
+        Assert.Equal(SourceScope.Line, config.SourceScope);
     }
 
     [Fact]
@@ -31,6 +33,7 @@ public class ConfigStoreTests
                 TriggerWord = "assistant",
                 Model = "gemini-flash-latest",
                 LogsEnabled = true,
+                SourceScope = SourceScope.AllBeforeCursor,
             };
 
             store.Save(original);
@@ -40,6 +43,7 @@ public class ConfigStoreTests
             Assert.Equal(original.TriggerWord, reloaded.TriggerWord);
             Assert.Equal(original.Model, reloaded.Model);
             Assert.Equal(original.LogsEnabled, reloaded.LogsEnabled);
+            Assert.Equal(original.SourceScope, reloaded.SourceScope);
         }
         finally
         {

@@ -88,6 +88,41 @@ public class TypingBufferTests
     }
 
     [Fact]
+    public void TriggerLength_couvre_juste_declencheur_prompt_et_espaces_quand_source_presente()
+    {
+        const string frappe = "Bonjour je voulais savoir si le devis est pret donna rends ça formel  ";
+        var m = Type(frappe);
+
+        Assert.NotNull(m);
+        const string queueAttendue = "donna rends ça formel  "; // déclencheur + prompt + 2 espaces, sans la source
+        Assert.Equal(queueAttendue.Length, m!.Value.TriggerLength);
+        Assert.Equal(frappe.Length, m.Value.CharsToDelete); // CharsToDelete, lui, couvre tout
+    }
+
+    [Fact]
+    public void TriggerLength_egale_CharsToDelete_quand_pas_de_source_tapee()
+    {
+        // Sans source tapée, le déclencheur est en tout début de buffer : les deux
+        // longueurs coïncident (DonnaContext bascule alors sur le repli par sélection).
+        var m = Type("donna écris un haïku sur la mer  ");
+
+        Assert.NotNull(m);
+        Assert.Equal(0, m!.Value.Source.Length);
+        Assert.Equal(m.Value.CharsToDelete, m.Value.TriggerLength);
+    }
+
+    [Fact]
+    public void TriggerLength_couvre_juste_declencheur_et_espaces_quand_pas_de_prompt()
+    {
+        const string frappe = "réunion demain 14h donna  ";
+        var m = Type(frappe);
+
+        Assert.NotNull(m);
+        const string queueAttendue = "donna  "; // déclencheur + 2 espaces, prompt vide
+        Assert.Equal(queueAttendue.Length, m!.Value.TriggerLength);
+    }
+
+    [Fact]
     public void Une_formule_traitee_ne_contamine_pas_la_formule_suivante()
     {
         // Bug réel : sans reset après un match, le texte tapé ensuite s'accumule
