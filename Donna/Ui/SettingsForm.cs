@@ -55,8 +55,8 @@ public sealed class SettingsForm : Form
         var apiKeysTab = new TabPage("Clés API");
         var apiKeysLabel = new Label
         {
-            Text = "Une clé par ligne. La première est utilisée en priorité ; DONNA " +
-                   "bascule automatiquement sur la suivante en cas de quota dépassé.",
+            Text = "Une clé par ligne (Gemini et/ou Groq, détecté automatiquement). La " +
+                   "première est essayée en priorité ; DONNA bascule sur la suivante en cas d'échec.",
             Dock = DockStyle.Top,
             Height = 44,
             Padding = new Padding(0, 4, 0, 4),
@@ -65,6 +65,7 @@ public sealed class SettingsForm : Form
         _apiKeysTextBox = new TextBox
         {
             Multiline = true,
+            AcceptsReturn = true, // sinon Entrée déclenche l'AcceptButton (OK) au lieu d'une nouvelle ligne
             Dock = DockStyle.Fill,
             ScrollBars = ScrollBars.Vertical,
             UseSystemPasswordChar = true,
@@ -131,8 +132,12 @@ public sealed class SettingsForm : Form
 
         tabs.TabPages.AddRange([apiKeysTab, generalTab, advancedTab]);
 
-        Controls.Add(buttonPanel);
+        // Ordre important : en WinForms, le DERNIER contrôle ajouté est ancré EN PREMIER.
+        // tabs (Dock=Fill) doit donc être ajouté avant buttonPanel (Dock=Bottom), sinon
+        // Fill réserve tout l'espace avant que Bottom ait pu prendre sa tranche → le
+        // bandeau de boutons se retrouve écrasé à 0 pixel de hauteur, invisible.
         Controls.Add(tabs);
+        Controls.Add(buttonPanel);
 
         AcceptButton = okButton;
         CancelButton = cancelButton;
