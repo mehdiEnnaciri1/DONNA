@@ -167,10 +167,10 @@ public sealed class DonnaContext : ApplicationContext
     private async Task ProcessTriggerAsync(TriggerMatch trigger)
     {
         // Pas de ConfigureAwait(false) ici, volontairement : _pill (PillOverlay) est
-        // un contrôle WinForms, et SelectionReader.ReadSelection fait des appels OLE
-        // (Clipboard) — les deux exigent le thread UI STA. Rester sur le contexte de
-        // synchronisation WinForms garantit qu'on y reprend après l'appel réseau,
-        // jamais sur un thread du pool.
+        // un contrôle WinForms, et SelectionReader.ReadSelectionAsync fait des appels
+        // OLE (Clipboard) — les deux exigent le thread UI STA. Rester sur le contexte
+        // de synchronisation WinForms garantit qu'on y reprend après chaque `await`
+        // (attente réseau ou sondage du presse-papiers), jamais sur un thread du pool.
         _pill.ShowSending();
 
         // TypingBuffer ne voit ni le texte collé (Ctrl+V réinitialise le buffer par
@@ -188,12 +188,19 @@ public sealed class DonnaContext : ApplicationContext
             {
                 _injector.Replace(trigger.TriggerLength, "");
 
-                // Appel STRICTEMENT synchrone, sans Task.Run : ReadSelection fait des
-                // appels OLE (Clipboard) qui exigent le thread UI STA courant. Un
-                // Task.Run l'exécuterait sur un thread du pool (MTA) et ferait échouer
-                // ces appels. Ce blocage synchrone (jusqu'à ~500 ms) du thread du hook
-                // clavier est le compromis accepté pour ce chemin de repli, rare.
-                source = _selectionReader.ReadSelection(_sourceScope);
+                // Une vraie sélection va être créée dans le champ (potentiellement
+                // tout un document en portée AllBeforeCursor) : on le signale tant
+                // qu'elle est active, jusqu'à ShowSuccess/ShowError plus bas.
+                _pill.ShowSelectionActive();
+
+                // await, jamais Task.Run : ReadSelectionAsync fait des appels OLE
+                // (Clipboard) qui exigent le thread UI STA courant — Task.Run
+                // l'exécuterait sur un thread du pool (MTA) et les ferait échouer.
+                // Le sondage interne cède la main via `await Task.Delay` (pas
+                // Thread.Sleep) pour que la boucle de messages continue de tourner :
+                // sinon le hook clavier ne peut plus dispatcher nos propres
+                // évènements injectés (Ctrl+C...), qu'il doit lui-même acheminer.
+                source = await _selectionReader.ReadSelectionAsync(_sourceScope);
                 if (source.Length == 0)
                     throw new InvalidOperationException("Aucun texte à transformer : le champ est vide."); // le catch ci-dessous désélectionne
             }

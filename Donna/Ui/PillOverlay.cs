@@ -58,6 +58,14 @@ public sealed class PillOverlay : Form
     /// <summary>Requête en cours — reste affichée jusqu'à ShowSuccess/ShowError.</summary>
     public void ShowSending() => Display("⏳ Envoi en cours…", autoHideMs: null);
 
+    /// <summary>
+    /// Une sélection réelle (texte du champ, pas la formule de DONNA) est active en
+    /// arrière-plan — repli par sélection (voir SelectionReader). Toute frappe de
+    /// l'utilisateur remplacerait cette sélection : reste affichée jusqu'à
+    /// ShowSuccess/ShowError, qui marquent la fin de la fenêtre à risque.
+    /// </summary>
+    public void ShowSelectionActive() => Display("✋ Texte sélectionné — ne tapez pas…", autoHideMs: null);
+
     /// <summary>Réponse injectée avec succès — disparaît toute seule.</summary>
     public void ShowSuccess() => Display("✅", autoHideMs: 1200);
 

@@ -27,19 +27,25 @@ public enum SourceScope
 /// <see cref="Donna.Core.TypingBuffer"/> ne voit ni le texte collé (Ctrl+V vide le
 /// buffer par prudence) ni le texte déjà présent dans le champ.
 ///
+/// Entièrement asynchrone, et c'est ESSENTIEL : WH_KEYBOARD_LL délivre les
+/// évènements clavier au thread qui a installé le hook via SA file de messages —
+/// ce thread doit donc continuer à pomper les messages pendant qu'on attend.
+/// Nos propres évènements injectés (Maj/Ctrl+Origine, Ctrl+C) traversent CE MÊME
+/// hook pour atteindre l'application cible : un <c>Thread.Sleep</c> bloquant ce
+/// thread les empêcherait d'être dispatchés → interblocage (le sondage attend un
+/// Ctrl+C qui ne peut jamais aboutir). <c>await Task.Delay</c> rend la main à la
+/// boucle de messages entre deux sondages, sans jamais quitter le thread UI STA
+/// (pas de <c>ConfigureAwait(false)</c> : on reste sur le contexte de
+/// synchronisation WinForms, obligatoire pour les appels Clipboard/OLE).
+///
 /// Deux garanties essentielles, vu qu'une sélection (potentiellement tout un
 /// document, en portée <see cref="SourceScope.AllBeforeCursor"/>) est une arme
 /// chargée si elle reste active :
 ///  1. Aucune sélection n'est créée tant qu'on n'a pas vérifié que le
-///     presse-papiers est réellement accessible (voir <see cref="ReadSelection"/>,
-///     l'appel à <see cref="TryGetClipboardText"/> AVANT <see cref="SendSelectAndCopy"/>).
+///     presse-papiers est réellement accessible (voir <see cref="ReadSelectionAsync"/>,
+///     l'appel à <see cref="TryGetClipboardTextAsync"/> AVANT <see cref="SendSelectAndCopy"/>).
 ///  2. Toute sortie en échec (exception, timeout) désélectionne dans un `finally`
 ///     — jamais uniquement dans l'appelant, dont le chemin d'erreur peut varier.
-///
-/// DOIT être appelée depuis le thread UI STA : toutes les opérations
-/// presse-papiers (<c>System.Windows.Forms.Clipboard</c>) sont des appels OLE qui
-/// l'exigent — <see cref="EnsureStaThread"/> lève une erreur explicite sinon,
-/// plutôt que de laisser remonter l'exception OLE cryptique.
 /// </summary>
 public sealed class SelectionReader
 {
@@ -52,8 +58,11 @@ public sealed class SelectionReader
     /// Lève si le presse-papiers est inaccessible, si le thread n'est pas STA, ou si
     /// le presse-papiers n'a pas changé après Ctrl+C (délai dépassé). Dans tous les
     /// cas d'échec, garantit qu'aucune sélection ne reste active dans le champ.
+    ///
+    /// À appeler avec <c>await</c> directement (jamais via <c>Task.Run</c>, qui
+    /// ferait échouer les appels Clipboard hors STA) depuis le thread UI.
     /// </summary>
-    public string ReadSelection(SourceScope scope)
+    public async Task<string> ReadSelectionAsync(SourceScope scope)
     {
         EnsureStaThread();
 
@@ -61,7 +70,8 @@ public sealed class SelectionReader
         //    AVANT de créer la moindre sélection. Si cette lecture échoue (verrouillé
         //    par une autre application, etc.), on abandonne ici : aucune sélection
         //    n'a encore été créée, il n'y a donc rien à désélectionner.
-        if (!TryGetClipboardText(out string? previousClipboard))
+        (bool accessible, string? previousClipboard) = await TryGetClipboardTextAsync();
+        if (!accessible)
             throw new InvalidOperationException("Le presse-papiers est inaccessible (verrouillé par une autre application ?).");
 
         uint before = NativeInput.GetClipboardSequenceNumber();
@@ -70,10 +80,11 @@ public sealed class SelectionReader
         {
             SendSelectAndCopy(scope);
 
-            if (!WaitForClipboardChange(before))
+            if (!await WaitForClipboardChangeAsync(before))
                 throw new TimeoutException("Le presse-papiers n'a pas changé après Ctrl+C : rien à copier ?");
 
-            if (!TryGetClipboardText(out string? copied))
+            (bool readOk, string? copied) = await TryGetClipboardTextAsync();
+            if (!readOk)
                 throw new InvalidOperationException("Impossible de relire le presse-papiers après la copie.");
 
             succeeded = true;
@@ -89,13 +100,14 @@ public sealed class SelectionReader
             if (!succeeded)
                 TryDeselect();
 
-            TryRestoreClipboard(previousClipboard);
+            await TryRestoreClipboardAsync(previousClipboard);
         }
     }
 
     /// <summary>
     /// Désélectionne (Fin) sans rien copier ni modifier — à appeler après un échec
     /// pour laisser le curseur en fin de champ, sélection relâchée, texte intact.
+    /// Synchrone : un seul SendInput, ne bloque jamais rien (pas d'attente).
     /// </summary>
     public void Deselect() =>
         NativeInput.SendInputChecked(
@@ -127,14 +139,17 @@ public sealed class SelectionReader
         {
             throw new InvalidOperationException(
                 "Lecture du presse-papiers demandée hors du thread STA de l'interface — " +
-                "bug interne de DONNA (ReadSelection doit être appelée de façon synchrone " +
-                "depuis le thread UI, jamais via Task.Run).");
+                "bug interne de DONNA (ReadSelectionAsync doit être appelée avec await, " +
+                "jamais via Task.Run, depuis le thread UI).");
         }
     }
 
     // Sélection + copie envoyées en UN SEUL appel SendInput (même principe que
     // TextInjector) : Windows garantit l'ordre de traitement, sans entrelacement
-    // avec la frappe réelle de l'utilisateur.
+    // avec la frappe réelle de l'utilisateur. Ces évènements ne sont que DÉPOSÉS
+    // dans la file d'entrée ici — leur dispatch réel (donc le Ctrl+C qui remplit
+    // effectivement le presse-papiers) n'a lieu que lorsque le thread UI repompe
+    // ses messages, ce que permettent les `await Task.Delay` de ReadSelectionAsync.
     private static void SendSelectAndCopy(SourceScope scope)
     {
         var inputs = new List<NativeInput.INPUT>(8);
@@ -159,10 +174,12 @@ public sealed class SelectionReader
     }
 
     // On sonde un signal observable (le numéro de séquence du presse-papiers,
-    // incrémenté par Windows à CHAQUE écriture) plutôt que de deviner un délai fixe
-    // — c'est exactement la course qui a causé le bug du Ctrl+V collant un contenu
-    // périmé. Ici on attend la preuve que le Ctrl+C a réellement eu lieu.
-    private static bool WaitForClipboardChange(uint before)
+    // incrémenté par Windows à CHAQUE écriture) plutôt que de deviner un délai fixe.
+    // `await Task.Delay` (pas Thread.Sleep) entre deux sondages : rend la main à la
+    // boucle de messages du thread UI, indispensable pour que le hook clavier
+    // puisse dispatcher les évènements Ctrl+C qu'on vient d'injecter (sinon
+    // interblocage : on attendrait un Ctrl+C qui ne peut jamais être traité).
+    private static async Task<bool> WaitForClipboardChangeAsync(uint before)
     {
         var stopwatch = Stopwatch.StartNew();
         while (stopwatch.ElapsedMilliseconds < ClipboardChangeTimeoutMs)
@@ -170,7 +187,7 @@ public sealed class SelectionReader
             if (NativeInput.GetClipboardSequenceNumber() != before)
                 return true;
 
-            Thread.Sleep(PollIntervalMs);
+            await Task.Delay(PollIntervalMs);
         }
 
         return false;
@@ -182,33 +199,32 @@ public sealed class SelectionReader
     // volontairement le filtre à InvalidOperationException (violation STA) : si
     // EnsureStaThread n'a pas déjà intercepté le problème (défense en profondeur),
     // on ne veut pas qu'elle traverse cette méthode sans être gérée.
-    // Renvoie false si la lecture échoue définitivement (presse-papiers
-    // inaccessible) — à distinguer de "true" avec `text = null` (rien à copier,
-    // ce qui est un résultat normal, pas un échec).
-    private static bool TryGetClipboardText(out string? text, int maxAttempts = 10, int delayMs = 20)
+    // Renvoie (false, null) si la lecture échoue définitivement (presse-papiers
+    // inaccessible) — à distinguer de (true, null) : rien à copier, un résultat
+    // normal, pas un échec.
+    private static async Task<(bool ok, string? text)> TryGetClipboardTextAsync(int maxAttempts = 10, int delayMs = 20)
     {
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
-                text = Clipboard.ContainsText() ? Clipboard.GetText() : null;
-                return true;
+                string? text = Clipboard.ContainsText() ? Clipboard.GetText() : null;
+                return (true, text);
             }
             catch (Exception ex) when (attempt < maxAttempts && ex is ExternalException or InvalidOperationException)
             {
-                Thread.Sleep(delayMs);
+                await Task.Delay(delayMs);
             }
         }
 
-        text = null;
-        return false;
+        return (false, null);
     }
 
     // Si le presse-papiers ne contenait pas de texte avant (image, vide...), on ne
     // touche pas à ce qu'on vient d'y mettre : il n'y a rien de textuel à restaurer.
-    // Best effort : on ne propage jamais d'exception depuis ici (voir commentaire
-    // sur TryGetClipboardText pour l'élargissement du filtre d'exceptions).
-    private static void TryRestoreClipboard(string? previousClipboard, int maxAttempts = 10, int delayMs = 20)
+    // Best effort : ne propage jamais d'exception (voir commentaire sur
+    // TryGetClipboardTextAsync pour l'élargissement du filtre d'exceptions).
+    private static async Task TryRestoreClipboardAsync(string? previousClipboard, int maxAttempts = 10, int delayMs = 20)
     {
         if (previousClipboard is null)
             return;
@@ -222,7 +238,7 @@ public sealed class SelectionReader
             }
             catch (Exception ex) when (attempt < maxAttempts && ex is ExternalException or InvalidOperationException)
             {
-                Thread.Sleep(delayMs);
+                await Task.Delay(delayMs);
             }
         }
     }
