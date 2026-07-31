@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Donna.Input;
 
 namespace Donna.Config;
 
@@ -33,7 +34,20 @@ public sealed class ConfigStore
             return new AppConfig();
 
         string json = File.ReadAllText(_path);
-        return JsonSerializer.Deserialize<AppConfig>(json) ?? new AppConfig();
+        AppConfig config = JsonSerializer.Deserialize<AppConfig>(json) ?? new AppConfig();
+
+        // Mise en sécurité : la portée AllBeforeCursor (sélection clavier de tout le
+        // texte avant le curseur) a détruit des documents entiers en conditions
+        // réelles — une désélection après timeout peut être traitée par
+        // l'application AVANT la sélection elle-même (SendInput est asynchrone),
+        // laissant tout le document sélectionné sans rien pour le relâcher. On
+        // force donc Line, quelle que soit la valeur enregistrée, tant qu'un
+        // remplacement fiable (UI Automation, sans clavier ni sélection) n'a pas
+        // remplacé ce mécanisme.
+        if (config.SourceScope == SourceScope.AllBeforeCursor)
+            config.SourceScope = SourceScope.Line;
+
+        return config;
     }
 
     public void Save(AppConfig config)

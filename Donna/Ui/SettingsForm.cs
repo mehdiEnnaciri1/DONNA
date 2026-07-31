@@ -134,10 +134,17 @@ public sealed class SettingsForm : Form
         };
         _sourceScopeAllRadio = new RadioButton
         {
-            Text = "Tout avant le curseur (pour du code collé multi-ligne)",
+            // Désactivé : la sélection clavier de tout le texte avant le curseur a
+            // détruit des documents entiers en conditions réelles (SendInput étant
+            // asynchrone, une désélection de secours peut être traitée avant la
+            // sélection elle-même, laissant tout sélectionné sans rien pour le
+            // relâcher). Restera désactivé tant qu'un mécanisme de remplacement sans
+            // sélection (UI Automation) n'aura pas remplacé SelectionReader.
+            Text = "Tout avant le curseur — temporairement désactivé : risque de perte de données",
             AutoSize = true,
             Location = new Point(24, 178),
-            Checked = config.SourceScope == SourceScope.AllBeforeCursor,
+            Checked = false,
+            Enabled = false,
         };
 
         generalTab.Controls.AddRange([

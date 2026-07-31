@@ -33,7 +33,7 @@ public class ConfigStoreTests
                 TriggerWord = "assistant",
                 Model = "gemini-flash-latest",
                 LogsEnabled = true,
-                SourceScope = SourceScope.AllBeforeCursor,
+                SourceScope = SourceScope.Line,
             };
 
             store.Save(original);
@@ -44,6 +44,30 @@ public class ConfigStoreTests
             Assert.Equal(original.Model, reloaded.Model);
             Assert.Equal(original.LogsEnabled, reloaded.LogsEnabled);
             Assert.Equal(original.SourceScope, reloaded.SourceScope);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Load_force_Line_meme_si_AllBeforeCursor_est_enregistre()
+    {
+        // Mise en sécurité : AllBeforeCursor a causé une perte de données réelle
+        // (sélection clavier restée active après un échec). Load() doit toujours
+        // ramener à Line, quelle que soit la valeur présente sur disque — y compris
+        // pour un fichier de config plus ancien qui aurait encore AllBeforeCursor.
+        string path = TempConfigPath();
+        try
+        {
+            var store = new ConfigStore(path);
+            store.Save(new AppConfig { SourceScope = SourceScope.AllBeforeCursor });
+
+            AppConfig reloaded = store.Load();
+
+            Assert.Equal(SourceScope.Line, reloaded.SourceScope);
         }
         finally
         {
