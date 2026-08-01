@@ -12,6 +12,8 @@ namespace Donna.Input;
 internal static class NativeInput
 {
     public const ushort VK_BACK = 0x08;
+    public const ushort VK_SHIFT = 0x10;
+    public const ushort VK_RETURN = 0x0D;
 
     private const uint INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_KEYUP = 0x0002;

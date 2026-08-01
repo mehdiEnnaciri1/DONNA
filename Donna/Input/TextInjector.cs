@@ -28,26 +28,49 @@ public sealed class TextInjector
     /// </summary>
     public void Replace(int charsToDelete, string replacementText)
     {
+        // Normalise tous les sauts de ligne (\r\n, \r seul) en \n : un seul marqueur
+        // canonique à traiter plus bas, pour ne jamais injecter un \r isolé ni
+        // doubler l'effet d'une paire \r\n.
+        string normalized = replacementText.Replace("\r\n", "\n").Replace('\r', '\n');
+
         int backspaceCount = Math.Max(0, charsToDelete);
-        var inputs = new NativeInput.INPUT[backspaceCount * 2 + replacementText.Length * 2];
-        int i = 0;
+        var inputs = new List<NativeInput.INPUT>(backspaceCount * 2 + normalized.Length * 2);
 
         for (int b = 0; b < backspaceCount; b++)
         {
-            inputs[i++] = NativeInput.KeyInput(NativeInput.VK_BACK, keyUp: false);
-            inputs[i++] = NativeInput.KeyInput(NativeInput.VK_BACK, keyUp: true);
+            inputs.Add(NativeInput.KeyInput(NativeInput.VK_BACK, keyUp: false));
+            inputs.Add(NativeInput.KeyInput(NativeInput.VK_BACK, keyUp: true));
         }
 
         // On itère sur les `char` (unités UTF-16), pas sur les points de code : un
         // caractère hors du Plan de base (émoji...) occupe deux `char` consécutifs
         // (paire de substitution), chacun devient naturellement un évènement Unicode
         // distinct — Windows/l'application cible recombine la paire à la réception.
-        foreach (char c in replacementText)
+        foreach (char c in normalized)
         {
-            inputs[i++] = NativeInput.UnicodeKeyInput(c, keyUp: false);
-            inputs[i++] = NativeInput.UnicodeKeyInput(c, keyUp: true);
+            if (c == '\n')
+            {
+                // Maj+Entrée, JAMAIS Entrée seule ni le caractère Unicode brut \n/\r :
+                // Windows traduit un appui réel sur Entrée en WM_CHAR(0x0D) — injecter
+                // ce caractère produit exactement le même évènement, ce qui envoie le
+                // message dans les messageries (WhatsApp, Slack, Teams...) au lieu d'y
+                // insérer un saut de ligne. Maj+Entrée est le raccourci universellement
+                // reconnu par ces applications pour "nouvelle ligne, ne pas envoyer" —
+                // et dans un simple champ multiligne (Bloc-notes...), Maj+Entrée insère
+                // une ligne exactement comme Entrée seule : aucune régression là où
+                // l'ancien comportement était déjà sûr.
+                inputs.Add(NativeInput.KeyInput(NativeInput.VK_SHIFT, keyUp: false));
+                inputs.Add(NativeInput.KeyInput(NativeInput.VK_RETURN, keyUp: false));
+                inputs.Add(NativeInput.KeyInput(NativeInput.VK_RETURN, keyUp: true));
+                inputs.Add(NativeInput.KeyInput(NativeInput.VK_SHIFT, keyUp: true));
+            }
+            else
+            {
+                inputs.Add(NativeInput.UnicodeKeyInput(c, keyUp: false));
+                inputs.Add(NativeInput.UnicodeKeyInput(c, keyUp: true));
+            }
         }
 
-        NativeInput.SendInputChecked(inputs);
+        NativeInput.SendInputChecked([.. inputs]);
     }
 }
