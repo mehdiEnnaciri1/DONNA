@@ -28,18 +28,23 @@ Autres cas :
 
 | Ce que tu tapes | Comportement |
 |---|---|
-| `donna écris un haïku␣␣` | prompt seul → génération pure (pas de source) |
-| `mon texte donna␣␣` | source seule → corrige orthographe/grammaire par défaut |
 | `j'écoute madonna␣␣` | ne déclenche pas (`donna` collé à un mot) |
 
-### Texte collé ou déjà présent dans le champ
+### Les trois modes
 
-Si tu n'as rien tapé avant `donna` (par exemple : tu viens de coller du texte, puis tu
-tapes directement `donna corrige␣␣`), DONNA lit le contenu réel du champ via
-**UI Automation** (l'API d'accessibilité de Windows), sans injecter de touche, sans
-toucher au presse-papiers, sans jamais créer de sélection. Voir
-[Applications supportées](#applications-supportées) ci-dessous — cette lecture ne
-fonctionne pas partout.
+DONNA choisit automatiquement l'un de ces trois modes selon ce qui est tapé — jamais
+d'erreur ni de blocage pour choisir, ce n'est qu'une question de savoir d'où vient la
+source :
+
+| Formule tapée | Mode | Comportement |
+|---|---|---|
+| `donna <instruction>␣␣` (rien avant) | **3 — Génération pure** | Aucune source : l'IA génère directement à partir de l'instruction. Fonctionne partout, aucune dépendance à UI Automation. |
+| `<texte> donna <instruction>␣␣` | **1 — Source tapée** | Transforme `<texte>` selon `<instruction>`. Injection via frappe Unicode, fonctionne partout. |
+| `<texte> donna␣␣` | **1 — Source tapée** | Action par défaut (correction) sur `<texte>` tapé. |
+| `donna <instruction>␣␣` (texte collé/déjà présent, rien tapé avant) | **2 — Lecture UI Automation** | DONNA lit le contenu réel du champ (sans injecter de touche, sans presse-papiers, sans jamais créer de sélection), l'utilise comme source. Si la lecture échoue (application non supportée, curseur pas en fin de champ) → repli automatique sur le **mode 3**, jamais une erreur bloquante. |
+
+Voir [Applications supportées](#applications-supportées) ci-dessous pour le mode 2 —
+c'est le seul des trois qui dépend de l'application ciblée.
 
 Le mot déclencheur (`donna` par défaut), le modèle et les autres réglages sont
 configurables depuis la fenêtre **Réglages** (clic droit sur l'icône DONNA dans la barre
@@ -78,12 +83,14 @@ Le fichier de configuration (clés chiffrées, préférences) vit dans
 
 ### Annuler la dernière transformation
 
-Si DONNA a corrigé un champ par lecture UI Automation (texte collé, voir ci-dessus) et
-que le résultat ne convient pas, **clic droit sur l'icône → "Annuler la dernière
-transformation"** restaure le texte d'origine dans ce même champ. Ne conserve qu'un seul
-niveau d'annulation (pas d'historique), et uniquement pour ce chemin — la source tapée au
-clavier n'a pas besoin de ce filet, puisque DONNA n'y efface jamais rien tant que l'appel
-IA n'a pas réussi.
+Si DONNA a corrigé un champ en mode 2 (lecture UI Automation, voir ci-dessus) et que le
+résultat ne convient pas, **clic droit sur l'icône → "Annuler la dernière
+transformation"** restaure le texte d'origine dans ce même champ — grisé quand il n'y a
+rien à annuler. Passe par le même mécanisme d'écriture que la transformation elle-même
+(voir ci-dessous), donc fonctionne aussi bien dans WhatsApp Web que dans le Bloc-notes.
+Ne conserve qu'un seul niveau d'annulation (pas d'historique), et uniquement pour le mode
+2 — le mode 1 (source tapée) n'a pas besoin de ce filet, puisque DONNA n'y efface jamais
+rien tant que l'appel IA n'a pas réussi.
 
 ### Diagnostic
 
@@ -93,28 +100,47 @@ système ; rien n'est journalisé sans activation explicite).
 
 ## Applications supportées
 
-La lecture d'un champ sans source tapée (texte collé ou déjà présent) dépend de ce que
-l'application expose via UI Automation — DONNA ne devine jamais, elle affiche un message
-clair et n'agit pas si l'application n'est pas supportée.
+Les **modes 1 et 3** (source tapée / génération pure) fonctionnent **dans toutes les
+applications** : ils reposent uniquement sur l'injection de frappe (`TextInjector`), pas
+sur UI Automation.
 
-| Application | Lecture (texte collé) | Remarque |
-|---|---|---|
-| Bloc-notes classique | ✅ | Testé : lecture et écriture confirmées |
-| Champs de navigateur (Chrome, adresses, formulaires) | ✅ | Testé en lecture |
-| **VS Code (éditeur de code)** | ❌ | Le contenu de l'éditeur Monaco n'est pas exposé via UI Automation (accessibilité activée seulement en mode lecteur d'écran) — limitation connue, pas de contournement prévu |
-| Word, applications web type React (WhatsApp Web, Slack...) | ⚠️ | À vérifier au cas par cas — voir avertissement ci-dessous |
+Le **mode 2** (lecture du champ sans source tapée) dépend de ce que l'application expose
+via UI Automation en LECTURE — l'écriture, elle, a un repli : si `ValuePattern.SetValue`
+est refusé (WhatsApp Web, Word...), DONNA calcule le nombre exact de Backspace depuis le
+texte réellement lu, les envoie, vérifie par relecture, puis injecte la réponse en frappe
+Unicode — le même mécanisme que le mode 1, qui fonctionne partout où l'injection
+fonctionne (voir ARCHITECTURE.md §7.6 pour le détail).
+
+| Application | Mode 2 — lecture | Mode 2 — écriture | Remarque |
+|---|---|---|---|
+| Bloc-notes classique | ✅ | ✅ SetValue | Contrôle Edit standard, les deux patterns marchent nativement |
+| WhatsApp Web, Slack, Gmail (champs `contenteditable`) | ✅ | ✅ repli clavier | `SetValue` refusé sur ces champs ; le repli clavier vérifié prend le relais |
+| Word | ✅ | ✅ repli clavier | Document riche, pas un simple champ de saisie ; `SetValue` refusé, repli clavier |
+| Champs de navigateur simples (adresse, formulaires) | ✅ | ✅ SetValue | — |
+| **VS Code (éditeur de code)** | ❌ | ❌ | L'éditeur Monaco n'expose pas son contenu via UI Automation (accessibilité activée seulement en mode lecteur d'écran) — limitation connue, pas de contournement prévu. **Les modes 1 et 3 y fonctionnent normalement.** |
+
+Quand le mode 2 échoue en lecture (application non supportée, ou curseur pas en fin de
+champ), DONNA **ne bloque jamais** : elle retombe automatiquement sur le mode 3
+(génération pure).
+
+**Sauts de ligne dans les messageries** : une réponse multi-lignes est injectée avec
+Maj+Entrée pour chaque saut de ligne, jamais Entrée seule — Entrée seule enverrait le
+message dans WhatsApp/Slack/Teams avant la fin de l'injection.
 
 **Avertissement pour les applications web pilotées par JavaScript** (React et
-équivalents) : certaines peuvent accepter une écriture automatique sans mettre à jour leur
-propre état interne (le texte s'affiche mais l'application "ne le voit pas", et il peut
-disparaître à l'envoi). DONNA relit systématiquement la valeur après écriture pour
-détecter ce cas et afficher une erreur explicite plutôt que de laisser croire à un succès
-— mais si l'application accepte l'écriture *sans que la relecture le détecte*, DONNA ne
-peut pas s'en apercevoir. Vérifie toujours visuellement après usage sur une application
-que tu n'as pas encore testée.
+équivalents) : certaines peuvent accepter une écriture sans mettre à jour leur propre état
+interne (le texte s'affiche mais l'application "ne le voit pas", et il peut disparaître à
+l'envoi). DONNA relit systématiquement la valeur après chaque écriture (SetValue ou repli
+clavier) pour détecter ce cas et afficher une erreur explicite plutôt que de laisser
+croire à un succès — mais si l'application accepte l'écriture *sans que la relecture le
+détecte*, DONNA ne peut pas s'en apercevoir. Vérifie toujours que le résultat est bien pris
+en compte par l'application (pas seulement affiché) sur une application que tu n'as pas
+encore testée.
 
-Dans tous les cas où la lecture ou l'écriture échoue, **rien n'est modifié dans le
-champ** : DONNA abandonne proprement plutôt que de deviner.
+Dans tous les cas où la lecture ou l'écriture échoue définitivement, **rien n'est modifié
+dans le champ** (ou le texte d'origine est restauré si l'échec survient en cours
+d'écriture) : DONNA abandonne proprement plutôt que de deviner ou de laisser un état
+intermédiaire.
 
 ## Build depuis les sources
 
@@ -158,14 +184,15 @@ Détail module par module : voir [ARCHITECTURE.md](ARCHITECTURE.md).
   touches de navigation (flèches, Origine/Fin, Entrée, Échap, Tab) — par sécurité, pour
   ne jamais effacer plus que ce que DONNA a elle-même vu taper. Si tu corriges une faute
   avec les flèches avant de taper `donna`, seul le texte tapé après le dernier
-  déplacement du curseur sera envoyé (le reste tombe dans le repli UI Automation, voir
-  ci-dessus).
-- Lecture sans source tapée : traite **tout le contenu actuel du champ** comme source, pas
-  seulement une portion autour du curseur (UI Automation ne donne pas la position du
-  curseur pour toutes les applications) — la réponse remplace l'intégralité du champ.
-- VS Code (éditeur de code) n'est pas supporté pour la lecture sans source tapée — voir
-  [Applications supportées](#applications-supportées).
-- En cas d'échec de l'appel IA (quota, réseau...), DONNA n'efface ni ne modifie rien :
-  la formule tapée reste visible (source tapée au clavier) ou le champ reste intact
-  (lecture UI Automation).
+  déplacement du curseur sera considéré comme "tapé" (mode 1) ; le mode 2 exige que le
+  curseur soit resté en fin de champ depuis la fin du texte à lire, sinon il retombe sur
+  le mode 3.
+- Mode 2 : traite **tout le contenu actuel du champ** comme source, pas seulement une
+  portion autour du curseur (UI Automation ne donne pas la position du curseur pour
+  toutes les applications) — la réponse remplace l'intégralité du champ.
+- VS Code (éditeur de code) n'est pas supporté pour le mode 2 — voir
+  [Applications supportées](#applications-supportées). Les modes 1 et 3 y fonctionnent normalement.
+- En cas d'échec (appel IA, lecture, ou écriture même après le repli clavier), DONNA
+  n'efface ni ne modifie rien de définitif : la formule tapée reste visible (mode 1/3) ou
+  le texte d'origine est restauré (mode 2, voir ARCHITECTURE.md §7.6).
 - Icône temporaire simple (monogramme "D") — pas encore de charte graphique dédiée.

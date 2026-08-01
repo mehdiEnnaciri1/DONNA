@@ -23,17 +23,28 @@ Au **double espace**, DONNA :
 2. **efface la formule tapée** (source + `donna` + prompt + les 2 espaces) ;
 3. **injecte la réponse** à la place (frappe Unicode via `SendInput`, jamais de collage).
 
-### Si rien n'est tapé avant `donna` (texte collé ou déjà présent)
+### Les trois modes
 
 `TypingBuffer` ne voit que ce qui est **tapé au clavier** : ni le texte collé (Ctrl+V
 réinitialise le buffer par prudence), ni le texte déjà présent dans le champ avant que
-DONNA démarre. Si `donna instruction␣␣` est tapé sans rien devant, DONNA lit le contenu
-réel du champ via **UI Automation** (voir §2 et §7.6) plutôt que d'appeler l'IA avec une
-source vide.
+DONNA démarre. Une source tapée vide recouvre donc deux situations bien différentes, et
+DONNA (`TransformModeSelector`, voir §2 et §5) choisit entre trois modes :
 
-Historique : une première version lisait ce cas par **sélection clavier**
-(Maj/Ctrl+Origine puis Ctrl+C) — abandonnée après avoir détruit des documents entiers en
-conditions réelles (voir §7.6 pour le post-mortem complet).
+| Mode | Condition | Comportement |
+|---|---|---|
+| **1 — Source tapée** | `trigger.Source` non vide | Chemin historique : injection via `TextInjector`. Fonctionne partout. |
+| **2 — Lecture UI Automation** | Source vide, ET la lecture du champ (voir §7.6c) réussit et laisse du texte après retrait de la formule | Le texte lu devient la source. Écriture à deux niveaux (§7.6c) : `SetValue`, repli clavier vérifié sinon. |
+| **3 — Génération pure** | Source vide, ET la lecture échoue OU ne laisse rien après retrait de la formule | Aucune source : l'IA génère à partir du seul prompt. Injection via `TextInjector`, comme le mode 1 — fonctionne partout, aucune dépendance à UI Automation. |
+
+**Point essentiel (régression corrigée) :** un échec de lecture UI Automation (application
+non supportée, curseur pas en fin de champ) ne doit **jamais** empêcher le mode 3 — ce
+n'est pas une erreur, juste l'absence de texte à lire. Confondre "source vide" avec
+"lecture UI Automation obligatoire" a un temps cassé la génération pure dans toute
+application non supportée par UI Automation (voir §9).
+
+Historique : une première version lisait le cas "texte collé/déjà présent" par
+**sélection clavier** (Maj/Ctrl+Origine puis Ctrl+C) — abandonnée après avoir détruit des
+documents entiers en conditions réelles (voir §7.6 pour le post-mortem complet).
 
 ### Exemple concret (dans un mail Outlook)
 
@@ -51,20 +62,18 @@ Bonjour, je souhaiterais savoir si le devis est prêt.
 
 ### Cas particuliers
 
-| Ce que tu tapes | Comportement |
-|---|---|
-| `texte donna instruction␣␣` | transforme `texte` selon `instruction` |
-| `donna écris un haïku␣␣` | **prompt seul** → génération pure (pas de source) |
-| `mon texte donna␣␣` | **source seule** → action par défaut sur le texte |
-| `j'écoute madonna␣␣` | **ne déclenche pas** (`donna` collé à un mot) |
-| `texte donna reformule␣` | **ne déclenche pas** (un seul espace) |
-| `donna instruction␣␣` (rien tapé avant) | lecture du champ via UI Automation |
+| Ce que tu tapes | Mode | Comportement |
+|---|---|---|
+| `texte donna instruction␣␣` | 1 | transforme `texte` selon `instruction` |
+| `mon texte donna␣␣` | 1 | action par défaut (correction) sur le texte tapé |
+| `donna instruction␣␣` (texte collé/déjà présent) | 2 | lecture du champ via UI Automation, ce texte devient la source |
+| `donna écris un haïku␣␣` (champ vide ou lecture non supportée) | 3 | génération pure (pas de source) |
+| `j'écoute madonna␣␣` | — | **ne déclenche pas** (`donna` collé à un mot) |
+| `texte donna reformule␣` | — | **ne déclenche pas** (un seul espace) |
 
 ---
 
 ## 2. Principe de fonctionnement (le flux)
-
-### Chemin normal — source tapée au clavier
 
 ```
 [Touche pressée n'importe où dans Windows]
@@ -76,8 +85,20 @@ Bonjour, je souhaiterais savoir si le devis est prêt.
   KeyTranslator ── traduit en caractère Unicode (AZERTY + touches mortes)
         │
         ▼
-  TypingBuffer  ── reconstruit le texte tapé + détecte la formule
-        │  (formule complétée, source non vide)
+  TypingBuffer  ── reconstruit le texte tapé + détecte la formule (TriggerMatch)
+        │
+        │  Source tapée non vide ?
+        ├─ OUI ──────────────────────────────────► Mode 1
+        │
+        └─ NON : UiaFieldAccessor.TryReadFocusedField(TypedSuffix)
+                 (lecture, sur un thread MTA via Task.Run — voir §7.6c)
+                 puis TransformModeSelector.SelectMode(trigger, texteLu)
+                       │
+                       │  Lecture OK ET reste du texte après retrait de la formule ?
+                       ├─ OUI ─────────────────────► Mode 2
+                       └─ NON (non supporté, curseur ailleurs, ou rien à part
+                              la formule) ──────────► Mode 3 (JAMAIS une erreur)
+        │
         ▼
   GeminiClient / GroqClient ── envoie source + prompt à l'IA (fournisseur détecté par clé)
         │
@@ -85,40 +106,14 @@ Bonjour, je souhaiterais savoir si le devis est prêt.
   ResponseCleaner ── enlève préambules / guillemets / markdown
         │
         ▼
-  TextInjector  ── N Backspaces (efface la formule) puis frappe Unicode (injecte la réponse)
+  Mode 1 ou 3 : TextInjector.Replace(trigger.CharsToDelete, réponse)
+                (N Backspaces puis frappe Unicode — fonctionne partout)
+  Mode 2      : VerifiedFieldWriter.Write(élément, texteOrigine, réponse)
+                (SetValue, repli clavier vérifié sinon — voir §7.6c),
+                puis mémorise (élément, réponse, source) pour "Annuler"
         │
         ▼
   [Le champ affiche la réponse — le focus n'a jamais bougé]
-```
-
-### Chemin de repli — rien tapé avant `donna`
-
-```
-  TypingBuffer détecte la formule, Source == ""
-        │
-        ▼
-  UiaFieldAccessor.TryReadFocusedField() ── lit l'élément focalisé via ValuePattern
-        │                                    (repli TextPattern), sur un thread MTA
-        │                                    (Task.Run — voir §7.6)
-        │  (non supporté ? → erreur claire, rien n'est modifié, on s'arrête ici)
-        ▼
-  Source = texte lu, tronqué de la longueur exacte de la formule tapée
-  (découpage de chaîne — aucune touche envoyée pour "effacer" quoi que ce soit)
-        │
-        ▼
-  GeminiClient / GroqClient ── même appel que le chemin normal
-        │
-        ▼
-  ResponseCleaner
-        │
-        ▼
-  UiaFieldAccessor.TryWrite() ── ValuePattern.SetValue, PUIS relecture pour vérifier
-        │                         (détecte les apps JS qui acceptent l'écriture sans
-        │                         mettre à jour leur état interne — voir §7.6)
-        │  (échec de vérification ? → erreur claire, le champ n'a pas été modifié
-        │   par DONNA au-delà du SetValue lui-même — voir §7.6 sur la nuance d'atomicité)
-        ▼
-  Mémorise (élément, texte d'origine) pour "Annuler" (menu du tray)
 ```
 
 Réinitialisation du buffer déclenchée par :
@@ -161,11 +156,13 @@ Donna/
 │   ├── MouseHook.cs           WH_MOUSE_LL     — reset du buffer au clic
 │   ├── ForegroundWatcher.cs   SetWinEventHook / EVENT_SYSTEM_FOREGROUND — reset au changement de fenêtre
 │   ├── KeyTranslator.cs       ToUnicodeEx     — VK → caractère (AZERTY + touches mortes)
-│   ├── NativeInput.cs         Fabrique SendInput partagée (structures Win32, Backspace + Unicode)
+│   ├── NativeInput.cs         Fabrique SendInput partagée (structures Win32, Backspace, Unicode, Maj+Entrée)
 │   ├── TextInjector.cs        SendInput       — Backspaces + frappe Unicode (jamais de presse-papiers)
-│   └── UiaFieldAccessor.cs    UI Automation (COM) — lecture/écriture de champ sans source tapée
+│   ├── UiaFieldAccessor.cs    UI Automation (COM) — lecture (mode 2/3) et écriture niveau 1 (SetValue)
+│   └── VerifiedFieldWriter.cs Écriture à deux niveaux : SetValue, repli clavier vérifié sinon
 ├── Core/
-│   └── TypingBuffer.cs        Buffer + machine à états du trigger      ← CŒUR TESTABLE
+│   ├── TypingBuffer.cs         Buffer + machine à états du trigger      ← CŒUR TESTABLE
+│   └── TransformModeSelector.cs Choix du mode 1/2/3 — logique pure     ← TESTABLE
 ├── Ai/
 │   ├── AiProvider.cs           Détection Gemini/Groq par préfixe de clé
 │   ├── AiClientExceptions.cs   Exceptions partagées (quota, erreur API)
@@ -182,7 +179,8 @@ Donna/
 │   └── DpapiSecret.cs         Chiffre/déchiffre les clés via DPAPI
 └── Autostart.cs               Active/désactive le démarrage automatique (HKCU\...\Run)
 
-Donna.Tests/                   xUnit — TypingBuffer, ResponseCleaner, KeyRing, AiProvider, KeyEvent...
+Donna.Tests/                   xUnit — TypingBuffer, TransformModeSelector, VerifiedFieldWriter,
+                                ResponseCleaner, KeyRing, AiProvider, KeyEvent, ConfigStore...
 installer/donna.iss            Script Inno Setup
 build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
 ```
@@ -216,23 +214,47 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
   Unicode** avec `ToUnicodeEx`, en gérant la disposition **AZERTY**, les **touches mortes**
   (`^` + `e` → `ê`) et **AltGr** (`@ # € [ ]`). ⚠️ **Le point le plus difficile de la partie
   clavier.**
-- **`NativeInput.cs`** — fabrique partagée des structures `SendInput` Win32 (frappe
-  Backspace classique et frappe Unicode), utilisée uniquement par `TextInjector`.
-- **`TextInjector.cs`** — `SendInput` en un seul appel (Backspaces puis frappe Unicode
-  caractère par caractère). Ne touche **jamais** au presse-papiers ni à une sélection —
-  voir §7.6 pour l'historique de l'ancienne approche par Ctrl+V, abandonnée.
-- **`UiaFieldAccessor.cs`** — lit et écrit le contenu d'un champ via UI Automation
-  (`ValuePattern`/`TextPattern`), pour le cas où rien n'a été tapé avant `donna`. Aucune
-  touche injectée, aucun presse-papiers, aucune sélection. Écriture vérifiée par
-  relecture. Voir §7.6 pour le design complet et ses limites.
+- **`NativeInput.cs`** — fabrique partagée des structures `SendInput` Win32 (Backspace,
+  frappe Unicode, Maj+Entrée pour les sauts de ligne), utilisée uniquement par `TextInjector`.
+- **`TextInjector.cs`** — `SendInput` en un seul appel (Backspaces puis frappe caractère
+  par caractère). Ne touche **jamais** au presse-papiers ni à une sélection — voir §7.6
+  pour l'historique de l'ancienne approche par Ctrl+V, abandonnée. Chaque saut de ligne de
+  la réponse est injecté en **Maj+Entrée**, jamais Entrée seule ni le caractère `\r`/`\n`
+  brut : Windows traduit un appui réel sur Entrée en `WM_CHAR(0x0D)`, donc injecter ce
+  caractère produirait le même évènement qu'un vrai appui sur Entrée — ce qui enverrait le
+  message dans WhatsApp/Slack/Teams au lieu d'y insérer un saut de ligne. Maj+Entrée est le
+  raccourci universellement reconnu par ces applications pour "nouvelle ligne, ne pas
+  envoyer", et se comporte comme Entrée seule dans un champ multiligne simple (aucune
+  régression). Les `\r\n`/`\r` isolés sont normalisés en `\n` avant l'injection.
+- **`UiaFieldAccessor.cs`** — lit le contenu d'un champ (modes 2/3) et écrit en **niveau 1**
+  via `ValuePattern.SetValue`, pour le cas où rien n'a été tapé avant `donna`. Aucune touche
+  injectée pour la lecture, aucun presse-papiers, aucune sélection. Deux méthodes de
+  lecture : `TryReadFocusedField(expectedSuffix)` (choisit le pattern dont le résultat se
+  termine par la formule tapée — détection initiale du mode) et
+  `TryReadFocusedFieldRaw()` (le résultat le plus informatif des deux patterns, sans
+  attente particulière — sonde générale pour `VerifiedFieldWriter`). Voir §7.6 pour le
+  design complet et ses limites.
+- **`VerifiedFieldWriter.cs`** — écriture à deux niveaux pour le mode 2 : `UiaFieldAccessor.TryWrite`
+  (niveau 1, `SetValue`) en priorité, puis un **repli clavier vérifié** (niveau 2) si
+  indisponible ou si la vérification échoue — Backspace exacts (comptés depuis une
+  relecture fraîche du champ, jamais une valeur supposée) puis injection via `TextInjector`.
+  Chaque étape est vérifiée par relecture ; en cas d'échec, tente de restaurer le texte
+  d'origine plutôt que de laisser un état intermédiaire. Voir §7.6c.
 
 ### `Core/` — la logique pure (100 % testable)
 
 - **`TypingBuffer.cs`** — reconstruit le texte tapé et détecte la formule. Aucune
-  dépendance Win32. Renvoie un `TriggerMatch(Source, Prompt, CharsToDelete, TriggerLength)` —
-  `CharsToDelete` couvre toute la formule (chemin normal), `TriggerLength` couvre
-  seulement déclencheur + prompt + 2 espaces (chemin UI Automation, pour découper la
-  source sans rien effacer au clavier).
+  dépendance Win32. Renvoie un
+  `TriggerMatch(Source, Prompt, CharsToDelete, TriggerLength, TypedSuffix)` —
+  `CharsToDelete` couvre toute la formule (mode 1), `TriggerLength`/`TypedSuffix` couvrent
+  seulement déclencheur + prompt + 2 espaces (modes 2/3). `TriggerMatch.TryExtractSourceFromFieldText`
+  vérifie qu'un texte lu ailleurs (UI Automation) se termine bien par `TypedSuffix` avant
+  d'en déduire la source — jamais une troncature aveugle par longueur (voir §7.6c, curseur
+  pas en fin de champ).
+- **`TransformModeSelector.cs`** — décide entre les modes 1/2/3 (voir §1) à partir d'un
+  `TriggerMatch` et du texte éventuellement lu via UI Automation (`string?`, `null` si la
+  lecture n'a pas été tentée ou a échoué). Logique pure, aucune dépendance Win32/COM —
+  c'est ce qui permet de la tester entièrement en xUnit sans machine réelle.
 
 ### `Ai/`
 
@@ -281,14 +303,16 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
 - **Validation** = exactement **deux espaces consécutifs** en fin de saisie.
 - **Déclencheur** = le mot `donna` (configurable, insensible à la casse), qui doit être un
   **mot entier** : un espace (ou un bord) de chaque côté. `madonna` ne déclenche pas.
-- **Source** = tout ce qui précède `donna` dans le buffer (peut être vide → repli UI Automation).
+- **Source** = tout ce qui précède `donna` dans le buffer (peut être vide → modes 2/3, voir §1).
 - **Prompt** = tout ce qui suit `donna` jusqu'aux deux espaces (peut être vide).
 - Il faut **au moins** une source **ou** un prompt : `donna␣␣` seul ne fait rien.
-- **Chemin normal (source tapée)** — ce qui est effacé = tout le buffer (`CharsToDelete` =
+- **Mode 1 (source tapée)** — ce qui est effacé = tout le buffer (`CharsToDelete` =
   source + `donna` + prompt + 2 espaces), **jamais** plus.
-- **Chemin de repli (source vide)** — rien n'est effacé au clavier ; `TriggerLength`
-  (déclencheur + prompt + 2 espaces) sert uniquement à découper la formule du texte lu
-  via UI Automation, par soustraction de chaîne.
+- **Modes 2/3 (source vide)** — rien n'est effacé au clavier pour lire ; `TypedSuffix`
+  (le texte exact de déclencheur + prompt + 2 espaces, pas juste sa longueur) sert à
+  **vérifier** qu'un texte lu ailleurs (UI Automation) se termine bien par ceci avant d'en
+  déduire la source (`TryExtractSourceFromFieldText`) — jamais une troncature aveugle par
+  longueur, qui couperait du vrai contenu si le curseur n'était pas en fin de champ.
 - **Reset du buffer** : clic souris, changement de fenêtre, Entrée, Échap, Tab, flèches,
   Origine/Fin. Dans le doute → reset.
 - Le buffer est **toujours réinitialisé après une formule traitée** (avec succès ou non) :
@@ -367,33 +391,68 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
      pour la voie WPF, à fonctionnalité strictement identique. Le choix ne se discute pas.
    - **Threading** : Microsoft recommande d'appeler les clients UI Automation depuis un
      thread **MTA** (à l'inverse du presse-papiers, qui exige STA). `DonnaContext`
-     encapsule chaque appel `UiaFieldAccessor` dans un `Task.Run` (thread du pool, MTA par
-     défaut), et revient sur le thread STA (sans `ConfigureAwait(false)`) uniquement pour
-     la pastille WinForms. Contrairement à la sélection clavier, rien ici ne dépend du
-     pompage de messages du hook (aucune touche injectée), donc aucun risque
-     d'interblocage de ce type.
-   - **Couverture réelle, testée en direct** : Bloc-notes classique (lecture ET écriture
-     confirmées) et champs de navigateur Chrome (lecture confirmée) fonctionnent.
-     **L'éditeur Monaco de VS Code n'expose pas son contenu** via ces patterns (limitation
-     connue de Monaco : accessibilité activée seulement en mode lecteur d'écran) — DONNA
-     échoue proprement avec un message clair sur cette application, sans tenter de
-     contournement.
+     encapsule chaque appel `UiaFieldAccessor`/`VerifiedFieldWriter` dans un `Task.Run`
+     (thread du pool, MTA par défaut), et revient sur le thread STA (sans
+     `ConfigureAwait(false)`) uniquement pour la pastille WinForms. Contrairement à la
+     sélection clavier, rien ici ne dépend du pompage de messages du hook (aucune touche
+     injectée pour la lecture), donc aucun risque d'interblocage de ce type.
+   - **ValuePattern supporté mais vide (bug corrigé)** — sur un `contenteditable`
+     (WhatsApp Web, Slack, Gmail...), `ValuePattern` est souvent *disponible* mais renvoie
+     une chaîne vide (le vrai contenu n'est exposé que via `TextPattern`). Un simple repli
+     `??` sur "supporté ou pas" ne suffit pas, puisqu'une chaîne vide n'est pas
+     `null` : `TryReadFocusedField` essaie les deux patterns et retient celui dont le
+     résultat est réellement exploitable (non vide, et se terminant par la formule tapée),
+     pas le premier qui existe.
+   - **Confusion mode 2 / mode 3 (régression corrigée)** — une version antérieure
+     traitait toute source vide comme "il faut lire via UI Automation, sinon erreur",
+     cassant la génération pure (mode 3) dans toute application non supportée. Corrigé en
+     séparant clairement la DÉCOUVERTE du mode (`TransformModeSelector`, logique pure : une
+     lecture absente ou inexploitable fait retomber sur le mode 3, jamais une erreur) de la
+     LECTURE elle-même (`UiaFieldAccessor`, qui peut échouer sans conséquence).
+   - **Écriture universelle (mode 2) — deux niveaux, `VerifiedFieldWriter`.**
+     `ValuePattern.SetValue` est refusé par WhatsApp Web (`contenteditable`) et par Word
+     (document riche, pas un simple champ de saisie) : le mode 2 y était donc inutilisable
+     avec le seul niveau 1. Le niveau 2 (repli clavier vérifié) exploite le fait que
+     l'injection Unicode (`TextInjector`) fonctionne déjà partout (c'est le mécanisme du
+     mode 1) — le seul obstacle était de savoir combien effacer, et UI Automation donne
+     maintenant le contenu exact du champ :
+     1. Relire le champ **maintenant** (pas se fier à une valeur d'avant l'essai
+        `SetValue`, qui a pu le modifier partiellement même en cas d'échec).
+     2. Compter les Backspace nécessaires — en normalisant `\r\n` en `\n` d'abord
+        (`VerifiedFieldWriter.CountBackspacesNeeded`) : un saut de ligne peut être lu comme
+        2 caractères par UI Automation mais ne s'efface qu'avec **un seul** Backspace dans
+        la plupart des contrôles.
+     3. Envoyer les Backspace (jamais de sélection — la règle de sécurité du §7.6b tient
+        intégralement ici aussi).
+     4. Relire pour vérifier que le champ est vide. Effacement incomplet → recompter et
+        réessayer (nombre de tentatives borné). Toujours pas bon après ces tentatives →
+        réinjecter le texte d'origine et abandonner avec une erreur claire — jamais d'état
+        intermédiaire silencieux.
+     5. Injecter la réponse via `TextInjector`, puis relire pour vérifier.
    - **Applications JS (React et consorts) — limite acceptée.** Certaines peuvent
-     accepter un `SetValue` sans mettre à jour leur état interne (le texte s'affiche mais
-     l'application "ne le voit pas", et peut disparaître à l'envoi). La relecture de
-     vérification détecte le cas où le champ ne reflète PAS ce qu'on vient d'écrire, mais
-     ne peut pas détecter le cas plus subtil où le DOM montre bien la nouvelle valeur
-     alors que l'état interne (React) reste désynchronisé — auquel cas la vérification
-     réussirait à tort. Ce cas précis n'a pas pu être testé empiriquement en conditions de
-     développement (l'environnement de test ne permettait pas de garder le focus réel sur
-     une page de test) ; à surveiller en usage réel, en particulier sur les applications
-     de messagerie web.
+     accepter une écriture (`SetValue` ou repli clavier) sans mettre à jour leur état
+     interne (le texte s'affiche mais l'application "ne le voit pas", et peut disparaître
+     à l'envoi). La relecture de vérification détecte le cas où le champ ne reflète PAS ce
+     qu'on vient d'écrire, mais ne peut pas détecter le cas plus subtil où le DOM montre
+     bien la nouvelle valeur alors que l'état interne (React) reste désynchronisé —
+     auquel cas la vérification réussirait à tort. Ce cas précis n'a pas pu être testé
+     empiriquement en conditions de développement (l'environnement de test ne permettait
+     pas de garder le focus réel sur une page de test) ; à surveiller en usage réel, en
+     particulier sur les applications de messagerie web — toujours vérifier que le
+     résultat est bien pris en compte par l'application (pas seulement affiché).
    - **Nuance sur l'« atomicité »** : `SetValue` est une opération COM unique — pour un
      contrôle Win32 standard (Bloc-notes), un échec ne modifie effectivement rien. Pour
      un champ piloté par JavaScript, un échec de la vérification signifie que l'écriture
      a eu un effet, mais que son résultat final (valeur acceptée, revertie, ou partielle)
      est incertain — DONNA refuse alors de déclarer un succès plutôt que d'affirmer à
-     tort que rien n'a changé.
+     tort que rien n'a changé. Le repli clavier (niveau 2), lui, est vérifié à chaque
+     étape et restaure activement en cas d'échec (voir ci-dessus).
+   - **Couverture réelle, testée en direct** : Bloc-notes classique (lecture et écriture
+     niveau 1 confirmées) et champs de navigateur Chrome (lecture confirmée) fonctionnent.
+     **L'éditeur Monaco de VS Code n'expose pas son contenu** via ces patterns (limitation
+     connue de Monaco : accessibilité activée seulement en mode lecteur d'écran) — DONNA
+     échoue proprement avec un message clair sur cette application (modes 1 et 3 y
+     fonctionnent normalement), sans tenter de contournement.
 
 ---
 
@@ -426,6 +485,20 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
    de documents + interblocage), puis UI Automation (actuel, voir §7.6c).
 9. **Annulation** — mémorisation de la dernière transformation UI Automation (élément +
    texte d'origine), restaurable depuis le menu du tray.
+10. **Correctifs de robustesse UI Automation** — sélection du pattern par contenu exploitable
+    plutôt que simple présence (`ValuePattern` vide sur `contenteditable`, voir §7.6c) ;
+    vérification (`TryExtractSourceFromFieldText`) que le champ lu se termine bien par la
+    formule tapée avant d'en déduire la source (curseur pas en fin de champ).
+11. **Maj+Entrée pour les sauts de ligne** — `TextInjector` n'injecte plus jamais Entrée
+    seule ni le caractère `\r`/`\n` brut, pour ne pas envoyer prématurément un message dans
+    les messageries (WhatsApp, Slack, Teams...).
+12. **Séparation mode 2 / mode 3** (`TransformModeSelector`) — correction d'une régression
+    où toute source vide exigeait une lecture UI Automation réussie, cassant la génération
+    pure dans les applications non supportées (voir §7.6c).
+13. **Écriture universelle** (`VerifiedFieldWriter`) — repli clavier vérifié quand
+    `SetValue` est refusé (WhatsApp Web, Word), avec restauration en cas d'échec ; Annuler
+    utilise désormais le même mécanisme, et le menu du tray se grise quand il n'y a rien à
+    annuler (voir §7.6c).
 
 ---
 
@@ -436,7 +509,13 @@ touche au presse-papiers/UI Automation réel).
 
 - `TypingBuffer` : exemple Outlook, source seule, prompt seul, frontière de mot
   (`madonna`), simple vs double espace, Backspace, Reset, non-contamination entre deux
-  formules successives, découpage `CharsToDelete` vs `TriggerLength`.
+  formules successives, découpage `CharsToDelete` vs `TriggerLength`/`TypedSuffix`,
+  `TryExtractSourceFromFieldText` (succès, curseur pas en fin de champ, champ trop court).
+- `TransformModeSelector` : les trois modes, priorité du mode 1 même si une lecture UIA
+  est fournie, repli sur le mode 3 quand la lecture est absente ou inexploitable (jamais
+  une erreur bloquante).
+- `VerifiedFieldWriter` : `CountBackspacesNeeded` — normalisation `\r\n`/`\n` avant de
+  compter (partie pure ; le repli clavier réel n'est pas testé ici, voir contraintes en tête de section).
 - `ResponseCleaner` : suppression des préambules, guillemets, markdown.
 - `KeyRing` : rotation sur échec (quelle qu'en soit la raison), sélection de la clé
   suivante, épuisement.
