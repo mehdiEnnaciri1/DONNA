@@ -77,6 +77,37 @@ public sealed class UiaFieldAccessor
         !string.IsNullOrEmpty(text) && text.EndsWith(expectedSuffix, StringComparison.Ordinal);
 
     /// <summary>
+    /// Lit le contenu du champ actuellement focalisé sans exigence de
+    /// correspondance particulière — retient le résultat le plus informatif
+    /// entre ValuePattern et TextPattern (le plus long des deux non
+    /// <see langword="null"/>, ValuePattern à égalité). Sert de sonde générale
+    /// pendant le repli clavier (<see cref="VerifiedFieldWriter"/>) pour vérifier
+    /// l'état courant du champ après un Backspace ou une injection — pas pour
+    /// détecter la bonne source initiale (voir <see cref="TryReadFocusedField"/>
+    /// pour ça, qui a besoin de la formule attendue).
+    /// </summary>
+    public ReadResult? TryReadFocusedFieldRaw()
+    {
+        var automation = new CUIAutomation();
+        IUIAutomationElement? element = automation.GetFocusedElement();
+        if (element is null)
+            return null;
+
+        string? valueText = TryReadValuePattern(element);
+        string? textPatternText = TryReadTextPattern(element);
+
+        string? best = (valueText, textPatternText) switch
+        {
+            (null, null) => null,
+            (not null, null) => valueText,
+            (null, not null) => textPatternText,
+            _ => textPatternText!.Length > valueText!.Length ? textPatternText : valueText,
+        };
+
+        return best is null ? null : new ReadResult(element, best);
+    }
+
+    /// <summary>
     /// Écrit <paramref name="newText"/> dans <paramref name="element"/> via
     /// <c>ValuePattern.SetValue</c> — une seule opération atomique : soit elle
     /// aboutit entièrement, soit rien ne change côté DONNA (on ne fait qu'un seul
