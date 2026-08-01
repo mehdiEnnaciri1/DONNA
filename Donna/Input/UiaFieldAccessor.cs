@@ -12,7 +12,8 @@ namespace Donna.Input;
 ///
 /// Ici, aucune touche n'est injectée, aucun presse-papiers n'est touché, aucune
 /// sélection n'est créée : la lecture et l'écriture passent uniquement par les
-/// patterns UI Automation (ValuePattern en priorité, TextPattern en repli), qui
+/// patterns UI Automation (ValuePattern et TextPattern, le résultat exploitable
+/// étant choisi dynamiquement — voir <see cref="TryReadFocusedField"/>), qui
 /// n'ont aucun effet de bord sur le champ tant qu'on n'appelle pas explicitement
 /// <see cref="TryWrite"/>. La destruction devient impossible par construction.
 ///
@@ -36,22 +37,44 @@ public sealed class UiaFieldAccessor
     public sealed record ReadResult(IUIAutomationElement Element, string Text);
 
     /// <summary>
-    /// Lit le contenu du champ actuellement focalisé (tout Windows confondu),
-    /// via ValuePattern en priorité, TextPattern en repli. Renvoie
-    /// <see langword="null"/> si aucun des deux n'est supporté par
-    /// l'application — DONNA doit alors abandonner proprement (message clair),
+    /// Lit le contenu du champ actuellement focalisé (tout Windows confondu), en
+    /// essayant ValuePattern ET TextPattern, et en retenant celui des deux dont le
+    /// texte est réellement exploitable : non vide, et se terminant par
+    /// <paramref name="expectedSuffix"/> (la formule que DONNA a vue taper — voir
+    /// <see cref="Core.TriggerMatch.TypedSuffix"/>).
+    ///
+    /// Ce double critère est nécessaire : sur un <c>contenteditable</c> (WhatsApp
+    /// Web, Slack, Gmail...), ValuePattern est souvent *supporté* mais renvoie une
+    /// chaîne vide (le vrai contenu n'est exposé que via TextPattern) — un simple
+    /// repli <c>??</c> sur "supporté ou pas" ne suffit pas, puisqu'une chaîne vide
+    /// n'est pas <see langword="null"/> : il faut choisir activement le résultat
+    /// qui contient réellement ce qu'on cherche, pas le premier qui existe.
+    ///
+    /// Renvoie <see langword="null"/> si aucun des deux ne convient — application
+    /// non supportée, ou curseur qui n'était pas en fin de champ au moment du
+    /// déclenchement. DONNA doit alors abandonner proprement (message clair),
     /// jamais deviner un contenu ni se rabattre sur une sélection clavier.
     /// </summary>
-    public ReadResult? TryReadFocusedField()
+    public ReadResult? TryReadFocusedField(string expectedSuffix)
     {
         var automation = new CUIAutomation();
         IUIAutomationElement? element = automation.GetFocusedElement();
         if (element is null)
             return null;
 
-        string? text = TryReadValuePattern(element) ?? TryReadTextPattern(element);
-        return text is null ? null : new ReadResult(element, text);
+        string? valueText = TryReadValuePattern(element);
+        if (IsUsable(valueText, expectedSuffix))
+            return new ReadResult(element, valueText!);
+
+        string? textPatternText = TryReadTextPattern(element);
+        if (IsUsable(textPatternText, expectedSuffix))
+            return new ReadResult(element, textPatternText!);
+
+        return null;
     }
+
+    private static bool IsUsable(string? text, string expectedSuffix) =>
+        !string.IsNullOrEmpty(text) && text.EndsWith(expectedSuffix, StringComparison.Ordinal);
 
     /// <summary>
     /// Écrit <paramref name="newText"/> dans <paramref name="element"/> via

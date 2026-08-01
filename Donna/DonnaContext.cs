@@ -200,7 +200,7 @@ public sealed class DonnaContext : ApplicationContext
                 // fournit un thread du pool, MTA par défaut. Rien ne dépend ici du
                 // pompage de messages du hook clavier (aucune touche injectée),
                 // donc pas de risque d'interblocage à surveiller sur ce point.
-                UiaFieldAccessor.ReadResult? read = await Task.Run(() => _uiaAccessor.TryReadFocusedField());
+                UiaFieldAccessor.ReadResult? read = await Task.Run(() => _uiaAccessor.TryReadFocusedField(trigger.TypedSuffix));
                 if (read is null)
                 {
                     throw new InvalidOperationException(
@@ -210,12 +210,20 @@ public sealed class DonnaContext : ApplicationContext
 
                 // Le champ contient encore la formule tapée (rien n'a été effacé :
                 // on ne touche au champ qu'au moment d'écrire, plus bas) — on la
-                // retire par simple découpage de chaîne, connaissant sa longueur
-                // exacte (trigger.TriggerLength), sans envoyer le moindre Backspace.
-                if (read.Text.Length < trigger.TriggerLength)
-                    throw new InvalidOperationException("Le contenu du champ ne correspond pas à ce qui a été tapé.");
+                // retire par découpage de chaîne, sans envoyer le moindre Backspace.
+                // On VÉRIFIE d'abord que le texte lu se termine bien par exactement
+                // ce que DONNA a vu taper (TypedSuffix), plutôt que de tronquer par
+                // longueur : si le curseur n'était pas en fin de champ au moment du
+                // déclenchement (ex. clic au milieu d'un document déjà rempli), une
+                // troncature aveugle couperait du vrai contenu et laisserait la
+                // formule elle-même dans la source envoyée à l'IA.
+                if (!trigger.TryExtractSourceFromFieldText(read.Text, out source))
+                {
+                    throw new InvalidOperationException(
+                        "Le curseur n'était pas en fin de champ au moment du déclenchement. " +
+                        "Place-le à la fin, ou tape ta source avant \"donna\".");
+                }
 
-                source = read.Text[..^trigger.TriggerLength];
                 if (source.Length == 0)
                     throw new InvalidOperationException("Aucun texte à transformer : le champ est vide.");
 
