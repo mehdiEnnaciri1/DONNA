@@ -123,6 +123,59 @@ public class TypingBufferTests
     }
 
     [Fact]
+    public void TypedSuffix_correspond_exactement_a_la_queue_tapee()
+    {
+        const string frappe = "donna corrige  ";
+        var m = Type(frappe);
+
+        Assert.NotNull(m);
+        Assert.Equal(frappe, m!.Value.TypedSuffix);
+        Assert.Equal(m.Value.TypedSuffix.Length, m.Value.TriggerLength);
+    }
+
+    [Fact]
+    public void TryExtractSourceFromFieldText_reussit_quand_le_champ_se_termine_par_la_formule()
+    {
+        // Cas nominal : le curseur était en fin de champ au moment du déclenchement,
+        // donc le texte lu (ex. via UI Automation) se termine bien par ce qui a été tapé.
+        var m = Type("donna corrige  ");
+        Assert.NotNull(m);
+
+        bool ok = m!.Value.TryExtractSourceFromFieldText("texte collé plus tôt donna corrige  ", out string source);
+
+        Assert.True(ok);
+        Assert.Equal("texte collé plus tôt", source);
+    }
+
+    [Fact]
+    public void TryExtractSourceFromFieldText_echoue_si_le_curseur_n_etait_pas_en_fin_de_champ()
+    {
+        // Bug réel évité : si le curseur était au milieu du document (ex. clic dans un
+        // texte déjà présent), le champ ne se termine PAS par la formule tapée — une
+        // troncature aveugle par longueur couperait du vrai contenu et laisserait la
+        // formule dans la source. On doit détecter ce cas et refuser, pas deviner.
+        var m = Type("donna corrige  ");
+        Assert.NotNull(m);
+
+        bool ok = m!.Value.TryExtractSourceFromFieldText("donna corrige  et voici la suite du document", out string source);
+
+        Assert.False(ok);
+        Assert.Equal("", source);
+    }
+
+    [Fact]
+    public void TryExtractSourceFromFieldText_echoue_si_le_champ_est_plus_court_que_la_formule()
+    {
+        var m = Type("donna corrige tout ce texte  ");
+        Assert.NotNull(m);
+
+        bool ok = m!.Value.TryExtractSourceFromFieldText("court", out string source);
+
+        Assert.False(ok);
+        Assert.Equal("", source);
+    }
+
+    [Fact]
     public void Une_formule_traitee_ne_contamine_pas_la_formule_suivante()
     {
         // Bug réel : sans reset après un match, le texte tapé ensuite s'accumule

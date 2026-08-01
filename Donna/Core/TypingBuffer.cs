@@ -94,11 +94,14 @@ public sealed class TypingBuffer
         // On n'efface JAMAIS plus que notre propre buffer → le texte préexistant du
         // champ (chargé d'un brouillon, etc.) reste intact.
         // TriggerLength = uniquement la partie déclencheur + prompt + 2 espaces (sans
-        // la source) — sert au repli par sélection (DonnaContext) quand la source
+        // la source) — sert au repli UI Automation (DonnaContext) quand la source
         // tapée est vide : on n'efface alors QUE ce que l'utilisateur vient de taper,
         // jamais le texte réel (collé ou préexistant) qu'on va lire par ailleurs.
-        int triggerLength = _buffer.Length - triggerStart;
-        return new TriggerMatch(source, prompt, _buffer.Length, triggerLength);
+        // TypedSuffix = le texte exact de cette même portion (pas juste sa longueur) :
+        // sert à VÉRIFIER, avant de découper le texte lu ailleurs, que ce texte se
+        // termine bien par ce qu'on a réellement vu taper (voir TryExtractSourceFromFieldText).
+        string typedSuffix = _buffer.ToString(triggerStart, _buffer.Length - triggerStart);
+        return new TriggerMatch(source, prompt, _buffer.Length, typedSuffix.Length, typedSuffix);
     }
 
     /// <summary>
@@ -131,8 +134,34 @@ public sealed class TypingBuffer
 }
 
 /// <summary>Résultat d'une formule complétée.</summary>
-/// <param name="Source">Texte source à transformer (peut être vide → repli par sélection, voir DonnaContext).</param>
+/// <param name="Source">Texte source à transformer (peut être vide → repli UI Automation, voir DonnaContext).</param>
 /// <param name="Prompt">Instruction pour Gemini (peut être vide → action par défaut).</param>
 /// <param name="CharsToDelete">Backspace pour effacer TOUTE la formule (source + déclencheur + prompt + 2 espaces) — chemin normal, quand la source a été tapée.</param>
-/// <param name="TriggerLength">Backspace pour effacer SEULEMENT déclencheur + prompt + 2 espaces (sans la source) — chemin de repli, quand la source est vide.</param>
-public readonly record struct TriggerMatch(string Source, string Prompt, int CharsToDelete, int TriggerLength);
+/// <param name="TriggerLength">Longueur de <see cref="TypedSuffix"/> — Backspace pour effacer SEULEMENT déclencheur + prompt + 2 espaces (sans la source), chemin de repli.</param>
+/// <param name="TypedSuffix">Texte exact (pas juste sa longueur) de déclencheur + prompt + 2 espaces, tel que réellement tapé — sert à vérifier qu'un texte lu ailleurs (UI Automation) se termine bien par ceci avant d'en déduire la source.</param>
+public readonly record struct TriggerMatch(string Source, string Prompt, int CharsToDelete, int TriggerLength, string TypedSuffix)
+{
+    /// <summary>
+    /// Retrouve la source dans <paramref name="fieldText"/> (le contenu complet d'un
+    /// champ lu via UI Automation, quand rien n'a été tapé avant le déclencheur), en
+    /// vérifiant que ce texte se termine bien par <see cref="TypedSuffix"/> — la
+    /// formule exacte que DONNA a vue taper. Renvoie <see langword="false"/> si ce
+    /// n'est pas le cas (le curseur n'était pas en fin de champ au moment du
+    /// déclenchement, par exemple) : ne JAMAIS déduire une source par simple
+    /// troncature de longueur dans ce cas, au risque de couper du vrai contenu et de
+    /// laisser la formule elle-même dans la source envoyée à l'IA.
+    /// </summary>
+    public bool TryExtractSourceFromFieldText(string fieldText, out string source)
+    {
+        if (!fieldText.EndsWith(TypedSuffix, StringComparison.Ordinal))
+        {
+            source = "";
+            return false;
+        }
+
+        // Trim, comme la source du chemin normal (Detect ci-dessus) : cohérence entre
+        // les deux chemins, quelle que soit l'origine de la source.
+        source = fieldText[..^TypedSuffix.Length].Trim();
+        return true;
+    }
+}
