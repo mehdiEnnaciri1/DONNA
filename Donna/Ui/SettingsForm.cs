@@ -1,5 +1,4 @@
 using Donna.Config;
-using Donna.Input;
 
 namespace Donna.Ui;
 
@@ -20,8 +19,6 @@ public sealed class SettingsForm : Form
     private readonly TextBox _triggerWordTextBox;
     private readonly CheckBox _autostartCheckBox;
     private readonly ComboBox _modelComboBox;
-    private readonly RadioButton _sourceScopeLineRadio;
-    private readonly RadioButton _sourceScopeAllRadio;
     private readonly CheckBox _logsEnabledCheckBox;
 
     /// <param name="config">Config actuelle à refléter dans les champs.</param>
@@ -119,37 +116,21 @@ public sealed class SettingsForm : Form
         ]);
         _modelComboBox.Text = config.Model;
 
-        var sourceScopeLabel = new Label
+        var uiaInfoLabel = new Label
         {
-            Text = "Portée de la source quand rien n'est tapé :",
-            AutoSize = true,
+            // Informatif seulement, rien à régler : si rien n'a été tapé avant le
+            // déclencheur, DONNA lit le champ via UI Automation (sans presse-papiers ni
+            // sélection). Non disponible pour certaines applications (ex. l'éditeur de
+            // VS Code) — voir README.md.
+            Text = "Si rien n'est tapé avant le déclencheur, DONNA lit le champ (texte collé ou " +
+                   "déjà présent) automatiquement, sans toucher au presse-papiers. Non disponible " +
+                   "pour toutes les applications (ex. l'éditeur de VS Code) — voir README.md.",
             Location = new Point(12, 130),
-        };
-        _sourceScopeLineRadio = new RadioButton
-        {
-            Text = "Ligne (défaut, sûr)",
-            AutoSize = true,
-            Location = new Point(24, 154),
-            Checked = config.SourceScope == SourceScope.Line,
-        };
-        _sourceScopeAllRadio = new RadioButton
-        {
-            // Désactivé : la sélection clavier de tout le texte avant le curseur a
-            // détruit des documents entiers en conditions réelles (SendInput étant
-            // asynchrone, une désélection de secours peut être traitée avant la
-            // sélection elle-même, laissant tout sélectionné sans rien pour le
-            // relâcher). Restera désactivé tant qu'un mécanisme de remplacement sans
-            // sélection (UI Automation) n'aura pas remplacé SelectionReader.
-            Text = "Tout avant le curseur — temporairement désactivé : risque de perte de données",
-            AutoSize = true,
-            Location = new Point(24, 178),
-            Checked = false,
-            Enabled = false,
+            Size = new Size(380, 50),
         };
 
         generalTab.Controls.AddRange([
-            triggerLabel, _triggerWordTextBox, _autostartCheckBox, modelLabel, _modelComboBox,
-            sourceScopeLabel, _sourceScopeLineRadio, _sourceScopeAllRadio,
+            triggerLabel, _triggerWordTextBox, _autostartCheckBox, modelLabel, _modelComboBox, uiaInfoLabel,
         ]);
 
         var advancedTab = new TabPage("Avancé");
@@ -190,7 +171,6 @@ public sealed class SettingsForm : Form
     {
         TriggerWord = string.IsNullOrWhiteSpace(_triggerWordTextBox.Text) ? "donna" : _triggerWordTextBox.Text.Trim(),
         Model = string.IsNullOrWhiteSpace(_modelComboBox.Text) ? "gemini-2.5-flash" : _modelComboBox.Text.Trim(),
-        SourceScope = _sourceScopeAllRadio.Checked ? SourceScope.AllBeforeCursor : SourceScope.Line,
         LogsEnabled = _logsEnabledCheckBox.Checked,
     };
 }

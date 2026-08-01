@@ -3,13 +3,14 @@ using Donna.Config;
 using Donna.Core;
 using Donna.Input;
 using Donna.Ui;
+using Interop.UIAutomationClient;
 
 namespace Donna;
 
 /// <summary>
 /// Chef d'orchestre de DONNA : relie hooks, buffer, client Gemini et injecteur,
 /// charge/sauvegarde la configuration (clés API chiffrées DPAPI comprises), et
-/// gère l'icône de barre des tâches (menu Réglages / Quitter).
+/// gère l'icône de barre des tâches (menu Réglages / Annuler / Quitter).
 /// </summary>
 public sealed class DonnaContext : ApplicationContext
 {
@@ -39,14 +40,20 @@ public sealed class DonnaContext : ApplicationContext
     private readonly GeminiClient _gemini = new();
     private readonly GroqClient _groq = new();
     private readonly TextInjector _injector = new();
-    private readonly SelectionReader _selectionReader = new();
+    private readonly UiaFieldAccessor _uiaAccessor = new();
     private readonly NotifyIcon _trayIcon;
     private readonly PillOverlay _pill = new();
 
     private TypingBuffer _buffer;
     private KeyRing? _keyRing;
     private string _model;
-    private SourceScope _sourceScope;
+
+    // Dernière transformation écrite via UI Automation, pour "Annuler" (menu du
+    // tray) — seulement pour ce chemin : c'est le seul où on a déjà en main le
+    // texte d'origine ET une référence stable vers l'élément ciblé. On ne garde
+    // que la dernière (pas d'historique) et on ne restaure QUE dans ce même
+    // élément, jamais dans le champ qui a le focus au moment d'Annuler.
+    private (IUIAutomationElement Element, string PreviousText)? _lastTransformation;
 
     public DonnaContext()
     {
@@ -54,7 +61,6 @@ public sealed class DonnaContext : ApplicationContext
 
         _buffer = new TypingBuffer(config.TriggerWord);
         _model = config.Model;
-        _sourceScope = config.SourceScope;
         _keyRing = TryCreateKeyRing(config);
         DiagnosticLog.Enabled = config.LogsEnabled;
 
@@ -83,6 +89,7 @@ public sealed class DonnaContext : ApplicationContext
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Réglages...", null, (_, _) => OpenSettings());
+        menu.Items.Add("Annuler la dernière transformation", null, async (_, _) => await UndoLastTransformationAsync());
         menu.Items.Add("Quitter", null, (_, _) => ExitDonna());
 
         Icon icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
@@ -114,16 +121,16 @@ public sealed class DonnaContext : ApplicationContext
         // Applique les nouveaux réglages sans redémarrer DONNA.
         _buffer = new TypingBuffer(updated.TriggerWord);
         _model = updated.Model;
-        _sourceScope = updated.SourceScope;
         _keyRing = TryCreateKeyRing(updated);
         DiagnosticLog.Enabled = updated.LogsEnabled;
     }
 
     private void OnKeyDown(KeyEvent evt)
     {
-        // Ignore les touches injectées par TextInjector/SelectionReader eux-mêmes
-        // (leurs propres Backspace, frappes Unicode, Maj/Ctrl+Origine, Ctrl+C, Fin
-        // repassent par ce même hook) — sinon boucle de rétroaction et pollution du buffer.
+        // Ignore les touches injectées par TextInjector lui-même (ses propres
+        // Backspace/frappes Unicode repassent par ce même hook) — sinon boucle
+        // de rétroaction et pollution du buffer. UiaFieldAccessor n'injecte
+        // jamais de touche, donc rien à filtrer de ce côté-là.
         if (evt.IsInjected)
             return;
 
@@ -166,77 +173,113 @@ public sealed class DonnaContext : ApplicationContext
 
     private async Task ProcessTriggerAsync(TriggerMatch trigger)
     {
-        // Pas de ConfigureAwait(false) ici, volontairement : _pill (PillOverlay) est
-        // un contrôle WinForms, et SelectionReader.ReadSelectionAsync fait des appels
-        // OLE (Clipboard) — les deux exigent le thread UI STA. Rester sur le contexte
-        // de synchronisation WinForms garantit qu'on y reprend après chaque `await`
-        // (attente réseau ou sondage du presse-papiers), jamais sur un thread du pool.
+        // Pas de ConfigureAwait(false) ici, volontairement : _pill (PillOverlay)
+        // est un contrôle WinForms, ses méthodes doivent s'exécuter sur le
+        // thread UI. Rester sur le contexte de synchronisation WinForms
+        // garantit qu'on y reprend après chaque `await` (réseau, ou Task.Run
+        // UI Automation), jamais sur un thread du pool livré à lui-même.
         _pill.ShowSending();
 
-        // TypingBuffer ne voit ni le texte collé (Ctrl+V réinitialise le buffer par
-        // prudence) ni le texte déjà présent dans le champ avant que DONNA démarre.
-        // Repli : source vide → on efface juste ce qu'on vient de taper (le
-        // déclencheur + l'instruction), puis on lit le texte réel par sélection +
-        // copie (SelectionReader) plutôt que d'appeler l'IA avec une source vide.
-        bool usingSelectionFallback = trigger.Source.Length == 0;
+        // TypingBuffer ne voit ni le texte collé (Ctrl+V réinitialise le buffer
+        // par prudence) ni le texte déjà présent dans le champ avant que DONNA
+        // démarre. Repli : source vide → lecture du champ réel via UI
+        // Automation (UiaFieldAccessor), sans jamais injecter de touche, toucher
+        // au presse-papiers, ni créer de sélection — contrairement à l'ancienne
+        // lecture par sélection clavier, qui a détruit des documents entiers.
+        bool usingUiaFallback = trigger.Source.Length == 0;
+        IUIAutomationElement? targetElement = null;
 
         try
         {
             string source = trigger.Source;
 
-            if (usingSelectionFallback)
+            if (usingUiaFallback)
             {
-                _injector.Replace(trigger.TriggerLength, "");
+                // UI Automation est recommandé par Microsoft depuis un thread MTA
+                // (à l'inverse du presse-papiers, qui exigeait STA) — Task.Run
+                // fournit un thread du pool, MTA par défaut. Rien ne dépend ici du
+                // pompage de messages du hook clavier (aucune touche injectée),
+                // donc pas de risque d'interblocage à surveiller sur ce point.
+                UiaFieldAccessor.ReadResult? read = await Task.Run(() => _uiaAccessor.TryReadFocusedField());
+                if (read is null)
+                {
+                    throw new InvalidOperationException(
+                        "Lecture du champ non supportée par cette application (ex. l'éditeur de VS Code). " +
+                        "Tape ton texte avant le déclencheur pour cette application.");
+                }
 
-                // Une vraie sélection va être créée dans le champ (potentiellement
-                // tout un document en portée AllBeforeCursor) : on le signale tant
-                // qu'elle est active, jusqu'à ShowSuccess/ShowError plus bas.
-                _pill.ShowSelectionActive();
+                // Le champ contient encore la formule tapée (rien n'a été effacé :
+                // on ne touche au champ qu'au moment d'écrire, plus bas) — on la
+                // retire par simple découpage de chaîne, connaissant sa longueur
+                // exacte (trigger.TriggerLength), sans envoyer le moindre Backspace.
+                if (read.Text.Length < trigger.TriggerLength)
+                    throw new InvalidOperationException("Le contenu du champ ne correspond pas à ce qui a été tapé.");
 
-                // await, jamais Task.Run : ReadSelectionAsync fait des appels OLE
-                // (Clipboard) qui exigent le thread UI STA courant — Task.Run
-                // l'exécuterait sur un thread du pool (MTA) et les ferait échouer.
-                // Le sondage interne cède la main via `await Task.Delay` (pas
-                // Thread.Sleep) pour que la boucle de messages continue de tourner :
-                // sinon le hook clavier ne peut plus dispatcher nos propres
-                // évènements injectés (Ctrl+C...), qu'il doit lui-même acheminer.
-                source = await _selectionReader.ReadSelectionAsync(_sourceScope);
+                source = read.Text[..^trigger.TriggerLength];
                 if (source.Length == 0)
-                    throw new InvalidOperationException("Aucun texte à transformer : le champ est vide."); // le catch ci-dessous désélectionne
+                    throw new InvalidOperationException("Aucun texte à transformer : le champ est vide.");
+
+                targetElement = read.Element;
             }
 
             string reply = await GenerateWithKeyRotationAsync(source, trigger.Prompt);
             string cleaned = ResponseCleaner.Clean(reply);
 
-            // Repli : la sélection Ctrl+C est encore active, la 1re frappe la
-            // remplace — pas de Backspace à envoyer. Chemin normal : on efface
-            // toute la formule tapée avant d'injecter, comme avant.
-            _injector.Replace(usingSelectionFallback ? 0 : trigger.CharsToDelete, cleaned);
+            if (usingUiaFallback)
+            {
+                bool written = await Task.Run(() => _uiaAccessor.TryWrite(targetElement!, cleaned));
+                if (!written)
+                {
+                    throw new InvalidOperationException(
+                        "Cette application ne supporte pas l'écriture automatique du résultat " +
+                        "(le champ n'a pas confirmé la nouvelle valeur).");
+                }
+
+                _lastTransformation = (targetElement!, source);
+            }
+            else
+            {
+                _injector.Replace(trigger.CharsToDelete, cleaned);
+            }
+
             _pill.ShowSuccess();
         }
         catch (Exception ex)
         {
-            // Échec (quota, réseau, clé invalide, lecture de la sélection...) : on
-            // ne détruit jamais le texte réel de l'utilisateur. Chemin normal : on
-            // n'efface rien, la formule tapée reste visible. Repli sélection : le
-            // déclencheur tapé a déjà été effacé plus haut (nécessaire pour pouvoir
-            // sélectionner le texte réel) ; on désélectionne juste proprement pour
-            // que ce texte réel reste intact et visible, sans rien y coller.
+            // Échec (quota, réseau, clé invalide, champ non supporté, écriture
+            // refusée...) : dans les deux chemins, rien n'a été détruit — le
+            // chemin normal n'efface qu'après un succès, et le chemin UI
+            // Automation ne modifie le champ qu'au moment d'écrire (jamais avant).
             DiagnosticLog.LogException(ex);
             _pill.ShowError(ex.Message);
+        }
+    }
 
-            if (usingSelectionFallback)
+    private async Task UndoLastTransformationAsync()
+    {
+        if (_lastTransformation is not { } state)
+        {
+            _pill.ShowError("Rien à annuler.");
+            return;
+        }
+
+        try
+        {
+            bool restored = await Task.Run(() => _uiaAccessor.TryWrite(state.Element, state.PreviousText));
+            if (restored)
             {
-                try
-                {
-                    _selectionReader.Deselect();
-                }
-                catch
-                {
-                    // Best effort : ne jamais remplacer l'erreur déjà journalisée et
-                    // affichée par un second échec sur la désélection elle-même.
-                }
+                _lastTransformation = null;
+                _pill.ShowSuccess();
             }
+            else
+            {
+                _pill.ShowError("Impossible d'annuler : le champ visé n'est plus disponible ou a changé.");
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.LogException(ex);
+            _pill.ShowError("Impossible d'annuler : " + ex.Message);
         }
     }
 

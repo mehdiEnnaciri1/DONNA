@@ -3,8 +3,8 @@ namespace Donna.Input;
 /// <summary>
 /// Efface la formule tapée (N Backspace) puis injecte la réponse caractère par
 /// caractère via SendInput en frappe Unicode — jamais via le presse-papiers, qui
-/// n'est ni lu ni modifié ici (voir <see cref="SelectionReader"/> pour la lecture
-/// du champ, qui elle utilise le presse-papiers de façon contrôlée).
+/// n'est ni lu ni modifié ici (voir <see cref="UiaFieldAccessor"/> pour la
+/// lecture/écriture d'un champ sans source tapée, via UI Automation).
 ///
 /// Backspace et caractères sont envoyés en UN SEUL appel SendInput : Windows
 /// garantit alors que toute la séquence est traitée dans l'ordre, sans

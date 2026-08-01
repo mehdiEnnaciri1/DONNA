@@ -1,5 +1,3 @@
-using Donna.Input;
-
 namespace Donna.Config;
 
 /// <summary>
@@ -19,10 +17,4 @@ public sealed class AppConfig
 
     /// <summary>Active la journalisation de diagnostic dans %APPDATA%\Donna\logs\donna.log — voir DiagnosticLog.</summary>
     public bool LogsEnabled { get; set; }
-
-    /// <summary>
-    /// Portée de la sélection utilisée par <see cref="Input.SelectionReader"/> quand
-    /// aucune source n'a été tapée au clavier (texte collé ou déjà présent dans le champ).
-    /// </summary>
-    public SourceScope SourceScope { get; set; } = SourceScope.Line;
 }

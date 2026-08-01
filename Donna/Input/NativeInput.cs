@@ -5,19 +5,13 @@ namespace Donna.Input;
 
 /// <summary>
 /// Fabrique partagée des structures Win32 SendInput, utilisée par
-/// <see cref="TextInjector"/> (injection de texte) et <see cref="SelectionReader"/>
-/// (sélection + copie pour lire le contenu réel d'un champ). Centralise les
-/// détails d'interop délicats pour ne pas dupliquer le piège de taille de
-/// structure ci-dessous dans plusieurs fichiers.
+/// <see cref="TextInjector"/> pour l'injection de texte (Backspace + frappe
+/// Unicode). Centralise les détails d'interop délicats pour ne pas dupliquer le
+/// piège de taille de structure ci-dessous.
 /// </summary>
 internal static class NativeInput
 {
     public const ushort VK_BACK = 0x08;
-    public const ushort VK_SHIFT = 0x10;
-    public const ushort VK_CONTROL = 0x11;
-    public const ushort VK_END = 0x23;
-    public const ushort VK_HOME = 0x24;
-    public const ushort VK_C = 0x43;
 
     private const uint INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_KEYUP = 0x0002;
@@ -33,7 +27,7 @@ internal static class NativeInput
             throw new Win32Exception(Marshal.GetLastWin32Error());
     }
 
-    /// <summary>Frappe d'une touche virtuelle classique (Backspace, Ctrl, Maj, Origine, Fin, C...).</summary>
+    /// <summary>Frappe d'une touche virtuelle classique (ici, seulement Backspace).</summary>
     public static INPUT KeyInput(ushort vk, bool keyUp) => new()
     {
         type = INPUT_KEYBOARD,
@@ -100,12 +94,4 @@ internal static class NativeInput
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-    /// <summary>
-    /// Numéro de séquence du presse-papiers, incrémenté par Windows à CHAQUE
-    /// écriture. Utilisé par <see cref="SelectionReader"/> pour attendre un signal
-    /// observable après Ctrl+C plutôt que deviner un délai fixe.
-    /// </summary>
-    [DllImport("user32.dll")]
-    public static extern uint GetClipboardSequenceNumber();
 }

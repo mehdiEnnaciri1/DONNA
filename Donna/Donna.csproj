@@ -18,4 +18,12 @@
     <ApplicationIcon>Assets\donna.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Wrapper COM (pas managé WPF : UseWPF coûterait +57 Mo en publication
+         self-contained single-file pour un gain de fonctionnalité identique —
+         voir ARCHITECTURE.md). Utilisé pour lire/écrire le contenu d'un champ
+         via UI Automation sans jamais injecter de touche ni de sélection. -->
+    <PackageReference Include="Interop.UIAutomationClient" Version="10.16299.0" />
+  </ItemGroup>
+
 </Project>
