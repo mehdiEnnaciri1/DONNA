@@ -8,7 +8,7 @@ using Interop.UIAutomationClient;
 namespace Donna;
 
 /// <summary>
-/// Chef d'orchestre de DONNA : relie hooks, buffer, client Gemini et injecteur,
+/// Chef d'orchestre de DONNA : relie hooks, buffer, clients IA et injecteur,
 /// charge/sauvegarde la configuration (clés API chiffrées DPAPI comprises), et
 /// gère l'icône de barre des tâches (menu Réglages / Annuler / Quitter).
 /// </summary>
@@ -41,22 +41,30 @@ public sealed class DonnaContext : ApplicationContext
     private readonly GroqClient _groq = new();
     private readonly TextInjector _injector = new();
     private readonly UiaFieldAccessor _uiaAccessor = new();
+    private readonly VerifiedFieldWriter _verifiedWriter;
     private readonly NotifyIcon _trayIcon;
+    private readonly ToolStripItem _undoMenuItem;
     private readonly PillOverlay _pill = new();
 
     private TypingBuffer _buffer;
     private KeyRing? _keyRing;
     private string _model;
 
-    // Dernière transformation écrite via UI Automation, pour "Annuler" (menu du
-    // tray) — seulement pour ce chemin : c'est le seul où on a déjà en main le
-    // texte d'origine ET une référence stable vers l'élément ciblé. On ne garde
-    // que la dernière (pas d'historique) et on ne restaure QUE dans ce même
-    // élément, jamais dans le champ qui a le focus au moment d'Annuler.
-    private (IUIAutomationElement Element, string PreviousText)? _lastTransformation;
+    // Dernière transformation écrite via UI Automation (mode 2), pour "Annuler"
+    // (menu du tray) — seulement pour ce chemin : c'est le seul où on a déjà en
+    // main le texte d'origine ET une référence stable vers l'élément ciblé.
+    // CurrentText = ce que le champ contient MAINTENANT (la réponse injectée),
+    // utilisé comme dernier recours si le repli clavier d'Annuler doit
+    // lui-même effacer quelque chose. PreviousText = ce qu'Annuler doit remettre.
+    // On ne garde qu'une seule transformation (pas d'historique), et on ne
+    // restaure QUE dans ce même élément, jamais dans le champ qui a le focus
+    // au moment d'Annuler.
+    private (IUIAutomationElement Element, string CurrentText, string PreviousText)? _lastTransformation;
 
     public DonnaContext()
     {
+        _verifiedWriter = new VerifiedFieldWriter(_uiaAccessor, _injector);
+
         AppConfig config = _configStore.Load();
 
         _buffer = new TypingBuffer(config.TriggerWord);
@@ -73,7 +81,7 @@ public sealed class DonnaContext : ApplicationContext
         _mouseHook.Install();
         _foregroundWatcher.Install();
 
-        _trayIcon = CreateTrayIcon();
+        (_trayIcon, _undoMenuItem) = CreateTrayIcon();
     }
 
     private static KeyRing? TryCreateKeyRing(AppConfig config)
@@ -85,22 +93,28 @@ public sealed class DonnaContext : ApplicationContext
         return new KeyRing(keys);
     }
 
-    private NotifyIcon CreateTrayIcon()
+    private (NotifyIcon, ToolStripItem) CreateTrayIcon()
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Réglages...", null, (_, _) => OpenSettings());
-        menu.Items.Add("Annuler la dernière transformation", null, async (_, _) => await UndoLastTransformationAsync());
+
+        ToolStripItem undoItem = menu.Items.Add(
+            "Annuler la dernière transformation", null, async (_, _) => await UndoLastTransformationAsync());
+        undoItem.Enabled = false; // rien à annuler tant qu'aucune transformation (mode 2) n'a réussi
+
         menu.Items.Add("Quitter", null, (_, _) => ExitDonna());
 
         Icon icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
 
-        return new NotifyIcon
+        var trayIcon = new NotifyIcon
         {
             Icon = icon,
             Text = "DONNA",
             ContextMenuStrip = menu,
             Visible = true,
         };
+
+        return (trayIcon, undoItem);
     }
 
     private void OpenSettings()
@@ -180,73 +194,44 @@ public sealed class DonnaContext : ApplicationContext
         // UI Automation), jamais sur un thread du pool livré à lui-même.
         _pill.ShowSending();
 
-        // TypingBuffer ne voit ni le texte collé (Ctrl+V réinitialise le buffer
-        // par prudence) ni le texte déjà présent dans le champ avant que DONNA
-        // démarre. Repli : source vide → lecture du champ réel via UI
-        // Automation (UiaFieldAccessor), sans jamais injecter de touche, toucher
-        // au presse-papiers, ni créer de sélection — contrairement à l'ancienne
-        // lecture par sélection clavier, qui a détruit des documents entiers.
-        bool usingUiaFallback = trigger.Source.Length == 0;
-        IUIAutomationElement? targetElement = null;
-
         try
         {
-            string source = trigger.Source;
+            // Une source vide recouvre deux situations différentes : texte
+            // collé/déjà présent à lire (mode 2), ou aucune source voulue du
+            // tout (mode 3, génération pure). On tente donc TOUJOURS une
+            // lecture UI Automation quand rien n'est tapé — mais un échec de
+            // cette lecture (application non supportée, curseur ailleurs...)
+            // ne bloque JAMAIS rien : TransformModeSelector fait simplement
+            // retomber sur le mode 3, qui fonctionne partout via TextInjector.
+            UiaFieldAccessor.ReadResult? read = null;
+            if (trigger.Source.Length == 0)
+                read = await Task.Run(() => _uiaAccessor.TryReadFocusedField(trigger.TypedSuffix));
 
-            if (usingUiaFallback)
-            {
-                // UI Automation est recommandé par Microsoft depuis un thread MTA
-                // (à l'inverse du presse-papiers, qui exigeait STA) — Task.Run
-                // fournit un thread du pool, MTA par défaut. Rien ne dépend ici du
-                // pompage de messages du hook clavier (aucune touche injectée),
-                // donc pas de risque d'interblocage à surveiller sur ce point.
-                UiaFieldAccessor.ReadResult? read = await Task.Run(() => _uiaAccessor.TryReadFocusedField(trigger.TypedSuffix));
-                if (read is null)
-                {
-                    throw new InvalidOperationException(
-                        "Lecture du champ non supportée par cette application (ex. l'éditeur de VS Code). " +
-                        "Tape ton texte avant le déclencheur pour cette application.");
-                }
-
-                // Le champ contient encore la formule tapée (rien n'a été effacé :
-                // on ne touche au champ qu'au moment d'écrire, plus bas) — on la
-                // retire par découpage de chaîne, sans envoyer le moindre Backspace.
-                // On VÉRIFIE d'abord que le texte lu se termine bien par exactement
-                // ce que DONNA a vu taper (TypedSuffix), plutôt que de tronquer par
-                // longueur : si le curseur n'était pas en fin de champ au moment du
-                // déclenchement (ex. clic au milieu d'un document déjà rempli), une
-                // troncature aveugle couperait du vrai contenu et laisserait la
-                // formule elle-même dans la source envoyée à l'IA.
-                if (!trigger.TryExtractSourceFromFieldText(read.Text, out source))
-                {
-                    throw new InvalidOperationException(
-                        "Le curseur n'était pas en fin de champ au moment du déclenchement. " +
-                        "Place-le à la fin, ou tape ta source avant \"donna\".");
-                }
-
-                if (source.Length == 0)
-                    throw new InvalidOperationException("Aucun texte à transformer : le champ est vide.");
-
-                targetElement = read.Element;
-            }
+            (TransformMode mode, string source) = TransformModeSelector.SelectMode(trigger, read?.Text);
 
             string reply = await GenerateWithKeyRotationAsync(source, trigger.Prompt);
             string cleaned = ResponseCleaner.Clean(reply);
 
-            if (usingUiaFallback)
+            if (mode == TransformMode.UiaSource)
             {
-                bool written = await Task.Run(() => _uiaAccessor.TryWrite(targetElement!, cleaned));
-                if (!written)
-                {
-                    throw new InvalidOperationException(
-                        "Cette application ne supporte pas l'écriture automatique du résultat " +
-                        "(le champ n'a pas confirmé la nouvelle valeur).");
-                }
+                IUIAutomationElement element = read!.Element;
+                string originalFieldText = read.Text;
 
-                _lastTransformation = (targetElement!, source);
+                // Écriture à deux niveaux : SetValue en priorité (atomique,
+                // vérifié), repli clavier vérifié sinon (Backspace exacts +
+                // injection Unicode — fonctionne là où SetValue est refusé,
+                // WhatsApp Web, Word...). Voir VerifiedFieldWriter.
+                await Task.Run(() => _verifiedWriter.Write(element, originalFieldText, cleaned));
+
+                _lastTransformation = (element, cleaned, source);
+                _undoMenuItem.Enabled = true;
             }
             else
             {
+                // Mode 1 (source tapée) et mode 3 (génération pure) : même
+                // injection classique, qui fonctionne partout — CharsToDelete
+                // couvre exactement la bonne longueur dans les deux cas (toute
+                // la formule tapée, avec ou sans source).
                 _injector.Replace(trigger.CharsToDelete, cleaned);
             }
 
@@ -254,10 +239,10 @@ public sealed class DonnaContext : ApplicationContext
         }
         catch (Exception ex)
         {
-            // Échec (quota, réseau, clé invalide, champ non supporté, écriture
-            // refusée...) : dans les deux chemins, rien n'a été détruit — le
-            // chemin normal n'efface qu'après un succès, et le chemin UI
-            // Automation ne modifie le champ qu'au moment d'écrire (jamais avant).
+            // Échec (quota, réseau, clé invalide, écriture refusée même après
+            // repli clavier...) : le mode normal n'efface qu'après un succès, et
+            // VerifiedFieldWriter restaure ou n'aboutit jamais à un état
+            // intermédiaire silencieux côté mode 2 — rien n'est perdu.
             DiagnosticLog.LogException(ex);
             _pill.ShowError(ex.Message);
         }
@@ -266,28 +251,28 @@ public sealed class DonnaContext : ApplicationContext
     private async Task UndoLastTransformationAsync()
     {
         if (_lastTransformation is not { } state)
-        {
-            _pill.ShowError("Rien à annuler.");
-            return;
-        }
+            return; // défense en profondeur : le menu est grisé dans ce cas
 
         try
         {
-            bool restored = await Task.Run(() => _uiaAccessor.TryWrite(state.Element, state.PreviousText));
-            if (restored)
-            {
-                _lastTransformation = null;
-                _pill.ShowSuccess();
-            }
-            else
-            {
-                _pill.ShowError("Impossible d'annuler : le champ visé n'est plus disponible ou a changé.");
-            }
+            // Même chemin d'écriture que le mode 2 (SetValue puis repli
+            // clavier vérifié) : Annuler doit fonctionner là où la
+            // transformation elle-même a eu besoin du repli clavier
+            // (WhatsApp Web, Word...), pas seulement là où SetValue marche.
+            await Task.Run(() => _verifiedWriter.Write(state.Element, state.CurrentText, state.PreviousText));
+            _pill.ShowSuccess();
         }
         catch (Exception ex)
         {
             DiagnosticLog.LogException(ex);
             _pill.ShowError("Impossible d'annuler : " + ex.Message);
+        }
+        finally
+        {
+            // Un seul niveau d'annulation : qu'elle réussisse ou échoue, on ne
+            // retente pas indéfiniment sur un état potentiellement incertain.
+            _lastTransformation = null;
+            _undoMenuItem.Enabled = false;
         }
     }
 
