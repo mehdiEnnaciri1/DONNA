@@ -77,34 +77,31 @@ public sealed class UiaFieldAccessor
         !string.IsNullOrEmpty(text) && text.EndsWith(expectedSuffix, StringComparison.Ordinal);
 
     /// <summary>
-    /// Lit le contenu du champ actuellement focalisé sans exigence de
-    /// correspondance particulière — retient le résultat le plus informatif
-    /// entre ValuePattern et TextPattern (le plus long des deux non
-    /// <see langword="null"/>, ValuePattern à égalité). Sert de sonde générale
-    /// pendant le repli clavier (<see cref="VerifiedFieldWriter"/>) pour vérifier
-    /// l'état courant du champ après un Backspace ou une injection — pas pour
-    /// détecter la bonne source initiale (voir <see cref="TryReadFocusedField"/>
-    /// pour ça, qui a besoin de la formule attendue).
+    /// Lit le contenu de <paramref name="element"/> — un élément précis, jamais
+    /// "celui qui a le focus maintenant" — en retenant le résultat le plus
+    /// informatif entre ValuePattern et TextPattern (le plus long des deux non
+    /// <see langword="null"/>, ValuePattern à égalité).
+    ///
+    /// Cible explicitement l'élément passé en paramètre, et non
+    /// <c>GetFocusedElement()</c> : pendant le repli clavier
+    /// (<see cref="VerifiedFieldWriter"/>), qui sonde le champ après chaque
+    /// Backspace/injection, le focus a pu bouger entre-temps (fenêtre changée,
+    /// clic de l'utilisateur...) — relire "ce qui a le focus" à ce moment-là
+    /// validerait le mauvais champ, ou une absence de champ, sans que DONNA
+    /// puisse s'en apercevoir.
     /// </summary>
-    public ReadResult? TryReadFocusedFieldRaw()
+    public string? TryReadElementText(IUIAutomationElement element)
     {
-        var automation = new CUIAutomation();
-        IUIAutomationElement? element = automation.GetFocusedElement();
-        if (element is null)
-            return null;
-
         string? valueText = TryReadValuePattern(element);
         string? textPatternText = TryReadTextPattern(element);
 
-        string? best = (valueText, textPatternText) switch
+        return (valueText, textPatternText) switch
         {
             (null, null) => null,
             (not null, null) => valueText,
             (null, not null) => textPatternText,
             _ => textPatternText!.Length > valueText!.Length ? textPatternText : valueText,
         };
-
-        return best is null ? null : new ReadResult(element, best);
     }
 
     /// <summary>
