@@ -156,28 +156,47 @@ public sealed class VerifiedFieldWriter(UiaFieldAccessor uia, TextInjector injec
 
     /// <summary>
     /// Sonde <paramref name="element"/> jusqu'à ce que son contenu atteigne
-    /// <paramref name="expected"/>, ou jusqu'à expiration d'un délai borné
-    /// (<see cref="ChangeTimeoutMs"/>), via <c>await Task.Delay</c> entre deux
-    /// lectures — jamais <c>Thread.Sleep</c>, et jamais de relecture immédiate :
-    /// <c>SendInput</c> ne fait que mettre les touches en file, leur traitement
-    /// par l'application ciblée prend un temps réel non nul.
+    /// <paramref name="expected"/>, ou jusqu'à ce qu'il reste STABLE (aucun
+    /// changement observé) pendant tout un délai borné (<see cref="ChangeTimeoutMs"/>),
+    /// via <c>await Task.Delay</c> entre deux lectures — jamais <c>Thread.Sleep</c>,
+    /// et jamais de relecture immédiate.
+    ///
+    /// Le délai se RÉARME à chaque changement réellement observé, même partiel :
+    /// sur un champ volumineux, effacer tout le contenu peut prendre plus que
+    /// <see cref="ChangeTimeoutMs"/>, et un délai fixe expirerait alors que les
+    /// Backspace sont encore en cours de traitement côté application — la
+    /// tentative suivante en enverrait par-dessus, sur-effaçant le champ. Ne
+    /// déclarer un blocage que quand la valeur n'a PAS bougé pendant tout le
+    /// délai est le seul moyen de distinguer "lent mais qui avance" de
+    /// "vraiment bloqué".
+    ///
     /// Renvoie la dernière valeur observée, qu'elle corresponde ou non à
     /// <paramref name="expected"/> — l'appelant compare pour savoir si l'attente
     /// a abouti, et peut distinguer "rien n'a changé du tout" (== <paramref
-    /// name="before"/>) de "changement partiel observé".
+    /// name="before"/>) de "changement partiel observé, puis bloqué ailleurs".
     /// </summary>
     private async Task<string?> WaitForValueAsync(IUIAutomationElement element, string expected, string before)
     {
-        var stopwatch = Stopwatch.StartNew();
         string? last = before;
+        var stableSince = Stopwatch.StartNew();
 
-        while (stopwatch.ElapsedMilliseconds < ChangeTimeoutMs)
+        while (stableSince.ElapsedMilliseconds < ChangeTimeoutMs)
         {
-            last = await ReadAsync(element);
-            if (last == expected)
-                return last;
-
             await Task.Delay(PollIntervalMs);
+
+            string? current = await ReadAsync(element);
+            if (current == expected)
+                return current;
+
+            if (current != last)
+            {
+                // Progrès réellement observé (même partiel) : le traitement
+                // est encore en cours côté application, pas bloqué — on
+                // réarme le délai de stabilité plutôt que de le laisser
+                // expirer pendant que des frappes sont encore en file.
+                last = current;
+                stableSince.Restart();
+            }
         }
 
         return last;

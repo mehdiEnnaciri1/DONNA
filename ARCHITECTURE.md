@@ -458,6 +458,17 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
      sans nécessité, ni une relecture immédiate) : on ne décide qu'une fois un
      changement réellement observé, et si rien ne change avant l'expiration du délai,
      DONNA abandonne sans envoyer une touche de plus plutôt que de deviner.
+   - **Délai fixe insuffisant sur un champ volumineux (bug corrigé) —** la première
+     version du sondage utilisait un délai borné fixe (mesuré depuis le premier envoi de
+     Backspace) : sur un champ contenant beaucoup de texte, l'effacement complet peut
+     prendre plus longtemps que ce délai tout en progressant normalement, ce qui faisait
+     expirer le sondage pendant que l'application traitait encore les touches en file —
+     la tentative suivante en envoyait alors un nouveau lot par-dessus, sur-effaçant le
+     champ. Corrigé en réarmant le délai à chaque changement réellement observé (même
+     partiel) : `WaitForValueAsync` ne conclut à un blocage que si la valeur reste
+     STABLE (aucun changement) pendant tout le délai, jamais simplement parce que le
+     délai total écoulé dépasse un seuil fixe. Un champ lent mais qui progresse peut
+     donc légitimement prendre plus de temps qu'un champ bloqué — c'est voulu.
    - **Applications JS (React et consorts) — limite acceptée.** Certaines peuvent
      accepter une écriture (`SetValue` ou repli clavier) sans mettre à jour leur état
      interne (le texte s'affiche mais l'application "ne le voit pas", et peut disparaître
