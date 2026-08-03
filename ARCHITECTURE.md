@@ -427,12 +427,22 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
      2. Un SEUL appel `TextInjector.Replace(backspaceCount, réponse)` — Backspace et
         caractères de la réponse dans le même `SendInput`, Windows garantissant l'ordre.
         Exactement le mécanisme du mode 1, qui fonctionne de façon fiable partout.
-     3. Vérification finale FACULTATIVE, après un court délai (le temps que l'application
-        traite les touches injectées) : relire le focus **actuel** via
-        `UiaFieldAccessor.TryReadCurrentlyFocusedText()` — une référence FRAÎCHE, jamais
-        l'élément mémorisé (voir l'incident ci-dessous) — et comparer à la réponse
-        attendue. Écart ou lecture impossible → simple avertissement, **sans envoyer une
-        seule touche de plus** et sans jamais tenter de "corriger" après coup.
+     3. Vérification finale FACULTATIVE, par sondage borné (≈1 s, `await Task.Delay`,
+        jamais `Thread.Sleep`) : relire le focus **actuel** via
+        `UiaFieldAccessor.TryReadCurrentlyFocusedText()` à chaque tour — une référence
+        FRAÎCHE réacquise à chaque sondage, jamais l'élément mémorisé (voir l'incident
+        ci-dessous). Cette vérification ne pilote plus aucune action (seul le message
+        affiché en dépend), donc la rendre patiente est sans risque — nécessaire sur
+        WhatsApp Web, où React remplace le nœud DOM du champ après l'écriture, et où UI
+        Automation peut prendre plus qu'un court instant à exposer le nouvel élément.
+        Trois issues distinctes, jamais une seule touche envoyée dans aucune :
+        - le texte lu correspond exactement à la réponse → succès ;
+        - la lecture est impossible, ou diffère à la fois de la réponse ET du texte
+          d'origine → succès aussi : le champ a manifestement changé (ou son élément est
+          devenu illisible, ce qui arrive précisément quand React remplace le nœud), on
+          ne peut simplement pas le confirmer au caractère près ;
+        - le texte lu reste identique au texte d'origine pendant tout le délai → seul cas
+          où l'on sait que rien n'a bougé, DONNA affiche alors un avertissement.
    - **Élément UI Automation périmé sur React — incident réel, corrigé en supprimant la
      vérification intermédiaire.** Une version antérieure effaçait par lots vérifiés :
      envoyer des Backspace, puis sonder le champ (via un `IUIAutomationElement` mémorisé
@@ -453,6 +463,18 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
      informative sur un élément fraîchement réacquis. Le vrai filet de sécurité devient
      "Annuler" (mémorisé même quand la vérification finale est incertaine), pas une
      tentative de correction automatique qui s'est révélée elle-même risquée.
+   - **Faux négatif corrigé — vérification finale trop impatiente.** Même après avoir
+     supprimé la boucle de réessai ci-dessus, la première version de la vérification
+     finale ne relisait qu'une seule fois, après un délai fixe de 150 ms. Sur WhatsApp
+     Web, React remplace le nœud DOM du champ après l'écriture, et UI Automation peut
+     mettre plus d'une seconde à exposer le nouvel élément — l'écriture réussissait
+     réellement, mais l'avertissement "impossible de confirmer" s'affichait
+     systématiquement, à tort. Comme cette vérification ne pilote plus aucune action
+     depuis la correction précédente (seul le message affiché en dépend), la rendre plus
+     patiente ne présente aucun risque : corrigé par un sondage borné (~1 s) au lieu d'une
+     lecture unique, avec trois issues distinctes plutôt que deux (voir ci-dessus) — en
+     particulier, une lecture devenue impossible pendant le remplacement du nœud DOM
+     compte désormais comme un succès non confirmé, pas comme un échec.
    - **Applications JS (React et consorts) — limite acceptée.** Certaines peuvent
      accepter une écriture (`SetValue` ou repli clavier) sans mettre à jour leur état
      interne (le texte s'affiche mais l'application "ne le voit pas", et peut disparaître
@@ -530,6 +552,13 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
     (Backspace + réponse dans le même `SendInput`, comme le mode 1), avec une
     vérification finale facultative sur un élément fraîchement réacquis par le focus —
     plus aucune décision intermédiaire sur la foi d'une relecture (voir §7.6c).
+15. **Vérification finale patiente, à trois issues** — une lecture unique après 150 ms
+    déclarait systématiquement à tort "impossible de confirmer" sur WhatsApp Web, où React
+    remplace le nœud DOM du champ après l'écriture (UI Automation met plus longtemps à
+    exposer le nouvel élément). Corrigé par un sondage borné (~1 s) qui ne conclut à un
+    échec que si le champ est resté identique à son état d'origine pendant tout le délai —
+    une lecture devenue impossible ou un texte différent des deux références comptent
+    désormais comme un succès non confirmé, pas comme un échec (voir §7.6c).
 
 ---
 
