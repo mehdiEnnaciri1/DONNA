@@ -77,18 +77,17 @@ public sealed class UiaFieldAccessor
         !string.IsNullOrEmpty(text) && text.EndsWith(expectedSuffix, StringComparison.Ordinal);
 
     /// <summary>
-    /// Lit le contenu de <paramref name="element"/> — un élément précis, jamais
-    /// "celui qui a le focus maintenant" — en retenant le résultat le plus
-    /// informatif entre ValuePattern et TextPattern (le plus long des deux non
-    /// <see langword="null"/>, ValuePattern à égalité).
+    /// Lit le contenu de <paramref name="element"/> en retenant le résultat le
+    /// plus informatif entre ValuePattern et TextPattern (le plus long des deux
+    /// non <see langword="null"/>, ValuePattern à égalité).
     ///
-    /// Cible explicitement l'élément passé en paramètre, et non
-    /// <c>GetFocusedElement()</c> : pendant le repli clavier
-    /// (<see cref="VerifiedFieldWriter"/>), qui sonde le champ après chaque
-    /// Backspace/injection, le focus a pu bouger entre-temps (fenêtre changée,
-    /// clic de l'utilisateur...) — relire "ce qui a le focus" à ce moment-là
-    /// validerait le mauvais champ, ou une absence de champ, sans que DONNA
-    /// puisse s'en apercevoir.
+    /// Un <see cref="IUIAutomationElement"/> mémorisé peut devenir périmé sur
+    /// certaines applications pilotées par JavaScript (React et consorts,
+    /// notamment WhatsApp Web) : dès que le contenu change, la référence COM
+    /// continue de renvoyer l'ANCIEN texte plutôt que le nouveau, ou une erreur.
+    /// Ne jamais réutiliser une référence mémorisée pour vérifier un changement
+    /// qu'on vient soi-même de provoquer — voir <see cref="TryReadCurrentlyFocusedText"/>,
+    /// qui réacquiert un élément frais via le focus courant pour cette raison.
     /// </summary>
     public string? TryReadElementText(IUIAutomationElement element)
     {
@@ -102,6 +101,22 @@ public sealed class UiaFieldAccessor
             (null, not null) => textPatternText,
             _ => textPatternText!.Length > valueText!.Length ? textPatternText : valueText,
         };
+    }
+
+    /// <summary>
+    /// Relit le contenu de l'élément qui a le focus MAINTENANT — une référence
+    /// fraîche via <c>GetFocusedElement()</c>, jamais une référence mémorisée
+    /// (voir <see cref="TryReadElementText"/> pour la raison : périmée sur les
+    /// applications React après un changement de contenu). Utilisée par
+    /// <see cref="VerifiedFieldWriter"/> pour une vérification finale facultative,
+    /// après coup, sans exigence de correspondance particulière (pas de suffixe
+    /// attendu — contrairement à <see cref="TryReadFocusedField"/>).
+    /// </summary>
+    public string? TryReadCurrentlyFocusedText()
+    {
+        var automation = new CUIAutomation();
+        IUIAutomationElement? element = automation.GetFocusedElement();
+        return element is null ? null : TryReadElementText(element);
     }
 
     /// <summary>

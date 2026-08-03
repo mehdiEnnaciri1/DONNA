@@ -218,16 +218,31 @@ public sealed class DonnaContext : ApplicationContext
                 string originalFieldText = read.Text;
 
                 // Écriture à deux niveaux : SetValue en priorité (atomique,
-                // vérifié), repli clavier vérifié sinon (Backspace exacts +
-                // injection Unicode — fonctionne là où SetValue est refusé,
-                // WhatsApp Web, Word...). Voir VerifiedFieldWriter. Appelée
-                // directement via await (pas de Task.Run ici) : Write est
-                // async et encapsule elle-même chacun de ses appels UI
-                // Automation dans un Task.Run pour rester sur un thread MTA.
-                await _verifiedWriter.Write(element, originalFieldText, cleaned);
+                // vérifié), repli clavier sinon — un seul appel
+                // TextInjector.Replace (Backspace + caractères dans le même
+                // SendInput, comme le mode 1), puis une vérification finale
+                // FACULTATIVE par relecture fraîche du focus. Voir
+                // VerifiedFieldWriter : aucune boucle effacer-vérifier-
+                // réessayer, pour ne jamais risquer de double effacement sur
+                // les applications où une référence UI Automation mémorisée
+                // devient périmée (WhatsApp Web). Appelée directement via
+                // await (pas de Task.Run ici) : Write est async et encapsule
+                // elle-même chacun de ses appels UI Automation dans un
+                // Task.Run pour rester sur un thread MTA.
+                bool verified = await _verifiedWriter.Write(element, originalFieldText, cleaned);
 
+                // Mémorisée dans tous les cas, même si la vérification est
+                // incertaine : c'est "Annuler" qui est le vrai filet de
+                // sécurité ici, pas cette vérification — l'écriture a de toute
+                // façon déjà eu lieu, la griser priverait l'utilisateur de son
+                // seul recours.
                 _lastTransformation = (element, cleaned, source);
                 _undoMenuItem.Enabled = true;
+
+                if (verified)
+                    _pill.ShowSuccess();
+                else
+                    _pill.ShowWarning("Écrit, mais impossible de confirmer — vérifie le champ.");
             }
             else
             {
@@ -236,16 +251,14 @@ public sealed class DonnaContext : ApplicationContext
                 // couvre exactement la bonne longueur dans les deux cas (toute
                 // la formule tapée, avec ou sans source).
                 _injector.Replace(trigger.CharsToDelete, cleaned);
+                _pill.ShowSuccess();
             }
-
-            _pill.ShowSuccess();
         }
         catch (Exception ex)
         {
-            // Échec (quota, réseau, clé invalide, écriture refusée même après
-            // repli clavier...) : le mode normal n'efface qu'après un succès, et
-            // VerifiedFieldWriter restaure ou n'aboutit jamais à un état
-            // intermédiaire silencieux côté mode 2 — rien n'est perdu.
+            // Échec avant toute écriture (quota, réseau, clé invalide...) : le
+            // texte tapé n'est jamais effacé sans réponse à injecter à la
+            // place, donc rien n'est perdu ici.
             DiagnosticLog.LogException(ex);
             _pill.ShowError(ex.Message);
         }
@@ -259,11 +272,14 @@ public sealed class DonnaContext : ApplicationContext
         try
         {
             // Même chemin d'écriture que le mode 2 (SetValue puis repli
-            // clavier vérifié) : Annuler doit fonctionner là où la
-            // transformation elle-même a eu besoin du repli clavier
-            // (WhatsApp Web, Word...), pas seulement là où SetValue marche.
-            await _verifiedWriter.Write(state.Element, state.CurrentText, state.PreviousText);
-            _pill.ShowSuccess();
+            // clavier) : Annuler doit fonctionner là où la transformation
+            // elle-même a eu besoin du repli clavier (WhatsApp Web, Word...),
+            // pas seulement là où SetValue marche.
+            bool verified = await _verifiedWriter.Write(state.Element, state.CurrentText, state.PreviousText);
+            if (verified)
+                _pill.ShowSuccess();
+            else
+                _pill.ShowWarning("Annulé, mais impossible de confirmer — vérifie le champ.");
         }
         catch (Exception ex)
         {

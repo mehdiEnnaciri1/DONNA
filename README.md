@@ -107,14 +107,16 @@ sur UI Automation.
 Le **mode 2** (lecture du champ sans source tapée) dépend de ce que l'application expose
 via UI Automation en LECTURE — l'écriture, elle, a un repli : si `ValuePattern.SetValue`
 est refusé (WhatsApp Web, Word...), DONNA calcule le nombre exact de Backspace depuis le
-texte réellement lu, les envoie, vérifie par relecture, puis injecte la réponse en frappe
-Unicode — le même mécanisme que le mode 1, qui fonctionne partout où l'injection
-fonctionne (voir ARCHITECTURE.md §7.6 pour le détail).
+texte réellement lu, puis les envoie avec la réponse en un seul geste (frappe Unicode,
+même mécanisme que le mode 1, qui fonctionne partout où l'injection fonctionne) — sans
+relecture intermédiaire ni nouvelle tentative en cours de route (voir ARCHITECTURE.md
+§7.6 pour le détail, et pourquoi une vérification intermédiaire s'est révélée risquée sur
+certaines applications).
 
 | Application | Mode 2 — lecture | Mode 2 — écriture | Remarque |
 |---|---|---|---|
 | Bloc-notes classique | ✅ | ✅ SetValue | Contrôle Edit standard, les deux patterns marchent nativement |
-| WhatsApp Web, Slack, Gmail (champs `contenteditable`) | ✅ | ✅ repli clavier | `SetValue` refusé sur ces champs ; le repli clavier vérifié prend le relais |
+| WhatsApp Web, Slack, Gmail (champs `contenteditable`) | ✅ | ✅ repli clavier | `SetValue` refusé sur ces champs ; le repli clavier (un seul envoi) prend le relais |
 | Word | ✅ | ✅ repli clavier | Document riche, pas un simple champ de saisie ; `SetValue` refusé, repli clavier |
 | Champs de navigateur simples (adresse, formulaires) | ✅ | ✅ SetValue | — |
 | **VS Code (éditeur de code)** | ❌ | ❌ | L'éditeur Monaco n'expose pas son contenu via UI Automation (accessibilité activée seulement en mode lecteur d'écran) — limitation connue, pas de contournement prévu. **Les modes 1 et 3 y fonctionnent normalement.** |
@@ -130,17 +132,20 @@ message dans WhatsApp/Slack/Teams avant la fin de l'injection.
 **Avertissement pour les applications web pilotées par JavaScript** (React et
 équivalents) : certaines peuvent accepter une écriture sans mettre à jour leur propre état
 interne (le texte s'affiche mais l'application "ne le voit pas", et il peut disparaître à
-l'envoi). DONNA relit systématiquement la valeur après chaque écriture (SetValue ou repli
-clavier) pour détecter ce cas et afficher une erreur explicite plutôt que de laisser
-croire à un succès — mais si l'application accepte l'écriture *sans que la relecture le
-détecte*, DONNA ne peut pas s'en apercevoir. Vérifie toujours que le résultat est bien pris
-en compte par l'application (pas seulement affiché) sur une application que tu n'as pas
-encore testée.
+l'envoi) — et une référence UI Automation mémorisée peut devenir périmée dès que le
+contenu change, rendant une vérification intermédiaire peu fiable (c'est pour cette raison
+que le repli clavier n'effectue plus qu'un seul envoi, sans relecture en cours de route).
+Après écriture, DONNA tente une vérification finale facultative (relecture du focus
+courant) ; si elle échoue ou ne correspond pas, un simple avertissement s'affiche — DONNA
+n'envoie alors plus aucune touche et ne tente jamais de corriger après coup. **"Annuler la
+dernière transformation" reste le vrai filet de sécurité** dans ce cas, pas la
+vérification elle-même. Vérifie toujours que le résultat est bien pris en compte par
+l'application (pas seulement affiché) sur une application que tu n'as pas encore testée.
 
-Dans tous les cas où la lecture ou l'écriture échoue définitivement, **rien n'est modifié
-dans le champ** (ou le texte d'origine est restauré si l'échec survient en cours
-d'écriture) : DONNA abandonne proprement plutôt que de deviner ou de laisser un état
-intermédiaire.
+Dans tous les cas où la lecture échoue, ou où l'appel IA échoue avant toute écriture,
+**rien n'est modifié dans le champ**. Une fois l'écriture effectuée (mode 2), DONNA ne
+revient jamais en arrière automatiquement, même si la vérification finale est
+incertaine — utilise "Annuler" au besoin.
 
 ## Build depuis les sources
 

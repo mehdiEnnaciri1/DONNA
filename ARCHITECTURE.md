@@ -228,25 +228,21 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
   régression). Les `\r\n`/`\r` isolés sont normalisés en `\n` avant l'injection.
 - **`UiaFieldAccessor.cs`** — lit le contenu d'un champ (modes 2/3) et écrit en **niveau 1**
   via `ValuePattern.SetValue`, pour le cas où rien n'a été tapé avant `donna`. Aucune touche
-  injectée pour la lecture, aucun presse-papiers, aucune sélection. Deux méthodes de
+  injectée pour la lecture, aucun presse-papiers, aucune sélection. Trois méthodes de
   lecture : `TryReadFocusedField(expectedSuffix)` (choisit le pattern dont le résultat se
   termine par la formule tapée — détection initiale du mode, sur l'élément qui a le focus
-  à cet instant) et `TryReadElementText(element)` (le résultat le plus informatif des deux
-  patterns, sur un **élément précis passé en paramètre** — jamais "celui qui a le focus
-  maintenant" — utilisé par `VerifiedFieldWriter` pour sonder l'état du champ ciblé sans
-  risquer de valider un autre élément si le focus a bougé entre-temps). Voir §7.6 pour le
-  design complet et ses limites.
+  à cet instant), `TryReadElementText(element)` (le résultat le plus informatif des deux
+  patterns, sur un élément précis passé en paramètre) et
+  `TryReadCurrentlyFocusedText()` (même lecture, mais en réacquérant l'élément focalisé
+  MAINTENANT plutôt qu'une référence mémorisée — utilisée par `VerifiedFieldWriter` pour sa
+  vérification finale, voir §7.6c pour la raison : une référence mémorisée peut devenir
+  périmée). Voir §7.6 pour le design complet et ses limites.
 - **`VerifiedFieldWriter.cs`** — écriture à deux niveaux pour le mode 2 : `UiaFieldAccessor.TryWrite`
-  (niveau 1, `SetValue`) en priorité, puis un **repli clavier vérifié** (niveau 2) si
-  indisponible ou si la vérification échoue — Backspace exacts (comptés depuis une
-  relecture fraîche du champ, jamais une valeur supposée) puis injection via `TextInjector`.
-  `SendInput` ne fait que mettre les touches en file : chaque étape attend un changement
-  RÉELLEMENT observé (sondage borné, `await Task.Delay`, jamais `Thread.Sleep` ni une
-  relecture immédiate) avant de décider quoi que ce soit, et cible toujours l'élément passé
-  en paramètre (`TryReadElementText`), jamais le focus courant. En cas d'échec, tente de
-  restaurer le texte d'origine plutôt que de laisser un état intermédiaire — sauf quand
-  aucun changement n'a été observé du tout, auquel cas le texte d'origine est par
-  construction encore intact et DONNA abandonne sans envoyer une touche de plus. Voir §7.6c.
+  (niveau 1, `SetValue`) en priorité, puis un **repli clavier** (niveau 2) sinon — un SEUL
+  appel `TextInjector.Replace` (Backspace exacts, comptés depuis le texte lu AVANT toute
+  écriture, puis caractères de la réponse, dans le même `SendInput`), suivi d'une
+  vérification finale FACULTATIVE par relecture fraîche du focus. Aucune boucle
+  effacer-vérifier-réessayer : voir §7.6c pour l'incident qui a mené à sa suppression.
 
 ### `Core/` — la logique pure (100 % testable)
 
@@ -419,56 +415,44 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
    - **Écriture universelle (mode 2) — deux niveaux, `VerifiedFieldWriter`.**
      `ValuePattern.SetValue` est refusé par WhatsApp Web (`contenteditable`) et par Word
      (document riche, pas un simple champ de saisie) : le mode 2 y était donc inutilisable
-     avec le seul niveau 1. Le niveau 2 (repli clavier vérifié) exploite le fait que
-     l'injection Unicode (`TextInjector`) fonctionne déjà partout (c'est le mécanisme du
-     mode 1) — le seul obstacle était de savoir combien effacer, et UI Automation donne
-     maintenant le contenu exact du champ :
-     1. Relire le champ **maintenant** (pas se fier à une valeur d'avant l'essai
-        `SetValue`, qui a pu le modifier partiellement même en cas d'échec).
-     2. Compter les Backspace nécessaires — en normalisant `\r\n` en `\n` d'abord
+     avec le seul niveau 1. Le niveau 2 (repli clavier) exploite le fait que l'injection
+     Unicode (`TextInjector`) fonctionne déjà partout (c'est le mécanisme du mode 1) — le
+     seul obstacle était de savoir combien effacer, et UI Automation donne le contenu
+     exact du champ **avant** toute écriture :
+     1. Compter les Backspace nécessaires depuis le texte lu au moment du déclenchement
+        (avant toute tentative d'écriture) — en normalisant `\r\n` en `\n` d'abord
         (`VerifiedFieldWriter.CountBackspacesNeeded`) : un saut de ligne peut être lu comme
         2 caractères par UI Automation mais ne s'efface qu'avec **un seul** Backspace dans
         la plupart des contrôles.
-     3. Envoyer les Backspace (jamais de sélection — la règle de sécurité du §7.6b tient
-        intégralement ici aussi).
-     4. **Attendre** (jamais relire immédiatement) que le champ **ciblé** reflète
-        réellement le vidage — sondage borné (`await Task.Delay`, jamais `Thread.Sleep`)
-        via `UiaFieldAccessor.TryReadElementText(element)` sur l'élément précis, jamais le
-        focus courant. Effacement incomplet mais un changement a bien été observé →
-        recompter depuis l'état réel et réessayer (nombre de tentatives borné). Aucun
-        changement du tout observé avant le timeout → abandonner immédiatement avec une
-        erreur claire, **sans envoyer une seule touche de plus** (le texte d'origine est
-        alors par construction encore intact, puisque rien n'a bougé). Voir l'incident
-        ci-dessous.
-     5. Injecter la réponse via `TextInjector`, puis attendre de la même façon (sondage
-        borné sur l'élément ciblé) que le champ reflète la nouvelle valeur.
-   - **Vérifier une action asynchrone avant qu'elle ait eu lieu (bug corrigé) —**
-     la toute première version du repli clavier envoyait les Backspace via `SendInput`
-     puis relisait le champ **immédiatement**. `SendInput` ne fait que mettre les
-     évènements en file d'attente : rien ne garantit qu'ils ont été traités par
-     l'application ciblée au retour de l'appel. La relecture immédiate voyait donc
-     souvent le champ encore inchangé, concluait à tort à un échec d'effacement, et
-     renvoyait un nouveau lot de Backspace — jusqu'à effacer plusieurs fois trop de
-     texte, y compris du contenu qui précédait la source. Même défaut dans la
-     restauration de secours. C'est exactement le même piège que le presse-papiers
-     (§7.6a) et la sélection clavier (§7.6b) : vérifier un effet côté application avant
-     qu'il ait réellement eu lieu. Corrigé en sondant le champ **ciblé** (jamais le
-     focus courant, qui a pu changer entre-temps) avec un délai borné entre deux
-     lectures (`await Task.Delay`, jamais `Thread.Sleep` — qui bloquerait le thread
-     sans nécessité, ni une relecture immédiate) : on ne décide qu'une fois un
-     changement réellement observé, et si rien ne change avant l'expiration du délai,
-     DONNA abandonne sans envoyer une touche de plus plutôt que de deviner.
-   - **Délai fixe insuffisant sur un champ volumineux (bug corrigé) —** la première
-     version du sondage utilisait un délai borné fixe (mesuré depuis le premier envoi de
-     Backspace) : sur un champ contenant beaucoup de texte, l'effacement complet peut
-     prendre plus longtemps que ce délai tout en progressant normalement, ce qui faisait
-     expirer le sondage pendant que l'application traitait encore les touches en file —
-     la tentative suivante en envoyait alors un nouveau lot par-dessus, sur-effaçant le
-     champ. Corrigé en réarmant le délai à chaque changement réellement observé (même
-     partiel) : `WaitForValueAsync` ne conclut à un blocage que si la valeur reste
-     STABLE (aucun changement) pendant tout le délai, jamais simplement parce que le
-     délai total écoulé dépasse un seuil fixe. Un champ lent mais qui progresse peut
-     donc légitimement prendre plus de temps qu'un champ bloqué — c'est voulu.
+     2. Un SEUL appel `TextInjector.Replace(backspaceCount, réponse)` — Backspace et
+        caractères de la réponse dans le même `SendInput`, Windows garantissant l'ordre.
+        Exactement le mécanisme du mode 1, qui fonctionne de façon fiable partout.
+     3. Vérification finale FACULTATIVE, après un court délai (le temps que l'application
+        traite les touches injectées) : relire le focus **actuel** via
+        `UiaFieldAccessor.TryReadCurrentlyFocusedText()` — une référence FRAÎCHE, jamais
+        l'élément mémorisé (voir l'incident ci-dessous) — et comparer à la réponse
+        attendue. Écart ou lecture impossible → simple avertissement, **sans envoyer une
+        seule touche de plus** et sans jamais tenter de "corriger" après coup.
+   - **Élément UI Automation périmé sur React — incident réel, corrigé en supprimant la
+     vérification intermédiaire.** Une version antérieure effaçait par lots vérifiés :
+     envoyer des Backspace, puis sonder le champ (via un `IUIAutomationElement` mémorisé
+     dès la détection du déclencheur) jusqu'à observer un changement, avant de décider
+     s'il fallait en envoyer d'autres. Sur WhatsApp Web (React), la référence mémorisée
+     est devenue périmée dès que le contenu a changé : elle continuait de renvoyer
+     l'ANCIEN texte au lieu du nouveau. La vérification concluait donc "aucun changement
+     observé" alors que l'effacement avait bel et bien eu lieu — et abandonnait après
+     avoir déjà détruit le contenu réel, exactement le résultat que la vérification était
+     censée empêcher. C'est le même piège que le presse-papiers (§7.6a) et la sélection
+     clavier (§7.6b) sous une forme nouvelle : cette fois, ce n'est pas la temporalité de
+     l'action qui trompait la vérification, mais la fraîcheur de ce qu'on relit. Aucune
+     fenêtre de relecture intermédiaire fiable n'existe sur ce type d'application — la
+     seule stratégie sûre est de ne jamais décider quoi que ce soit sur la foi d'une
+     relecture prise en cours de route, boucle de réessai comprise. Corrigé en supprimant
+     entièrement la boucle effacer-vérifier-réessayer (et `MaxEraseAttempts` avec elle) :
+     un seul envoi, aucune décision intermédiaire, une vérification finale strictement
+     informative sur un élément fraîchement réacquis. Le vrai filet de sécurité devient
+     "Annuler" (mémorisé même quand la vérification finale est incertaine), pas une
+     tentative de correction automatique qui s'est révélée elle-même risquée.
    - **Applications JS (React et consorts) — limite acceptée.** Certaines peuvent
      accepter une écriture (`SetValue` ou repli clavier) sans mettre à jour leur état
      interne (le texte s'affiche mais l'application "ne le voit pas", et peut disparaître
@@ -485,8 +469,9 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
      un champ piloté par JavaScript, un échec de la vérification signifie que l'écriture
      a eu un effet, mais que son résultat final (valeur acceptée, revertie, ou partielle)
      est incertain — DONNA refuse alors de déclarer un succès plutôt que d'affirmer à
-     tort que rien n'a changé. Le repli clavier (niveau 2), lui, est vérifié à chaque
-     étape et restaure activement en cas d'échec (voir ci-dessus).
+     tort que rien n'a changé. Le repli clavier (niveau 2), lui, n'est plus vérifié
+     qu'une seule fois, à la fin, et ne restaure jamais rien automatiquement (voir
+     ci-dessus) : Annuler est le mécanisme de recours, pas une correction silencieuse.
    - **Couverture réelle, testée en direct** : Bloc-notes classique (lecture et écriture
      niveau 1 confirmées) et champs de navigateur Chrome (lecture confirmée) fonctionnent.
      **L'éditeur Monaco de VS Code n'expose pas son contenu** via ces patterns (limitation
@@ -535,15 +520,16 @@ build.ps1                      dotnet publish → ISCC → Donna-Setup.exe
 12. **Séparation mode 2 / mode 3** (`TransformModeSelector`) — correction d'une régression
     où toute source vide exigeait une lecture UI Automation réussie, cassant la génération
     pure dans les applications non supportées (voir §7.6c).
-13. **Écriture universelle** (`VerifiedFieldWriter`) — repli clavier vérifié quand
-    `SetValue` est refusé (WhatsApp Web, Word), avec restauration en cas d'échec ; Annuler
-    utilise désormais le même mécanisme, et le menu du tray se grise quand il n'y a rien à
-    annuler (voir §7.6c).
-14. **Correction du repli clavier — attente au lieu de relecture immédiate** — la
-    vérification post-Backspace relisait le champ immédiatement après `SendInput`
-    (asynchrone), risquant jusqu'à 3× trop de Backspace envoyés ; corrigé par un sondage
-    borné (`await Task.Delay`) sur l'élément ciblé explicitement, jamais le focus courant
-    (voir §7.6c).
+13. **Écriture universelle** (`VerifiedFieldWriter`) — repli clavier quand `SetValue` est
+    refusé (WhatsApp Web, Word) ; Annuler utilise le même mécanisme, et le menu du tray se
+    grise quand il n'y a rien à annuler (voir §7.6c).
+14. **Suppression de la boucle effacer-vérifier-réessayer** — un `IUIAutomationElement`
+    mémorisé devenu périmé sur WhatsApp Web (React) faisait conclure à tort "aucun
+    changement" après un effacement réel, provoquant un nouveau lot de Backspace qui
+    détruisait le contenu avant d'abandonner. Corrigé en repli clavier à un seul coup
+    (Backspace + réponse dans le même `SendInput`, comme le mode 1), avec une
+    vérification finale facultative sur un élément fraîchement réacquis par le focus —
+    plus aucune décision intermédiaire sur la foi d'une relecture (voir §7.6c).
 
 ---
 

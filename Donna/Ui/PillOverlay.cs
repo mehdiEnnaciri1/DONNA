@@ -64,6 +64,14 @@ public sealed class PillOverlay : Form
     /// <summary>Échec — reste un peu plus longtemps pour être lisible.</summary>
     public void ShowError(string message) => Display($"❌ {message}", autoHideMs: 4000);
 
+    /// <summary>
+    /// L'écriture a eu lieu mais n'a pas pu être vérifiée (relecture impossible
+    /// ou différente de ce qui a été injecté) — distinct de <see cref="ShowError"/> :
+    /// il ne s'agit pas d'un échec, l'action a bien été tentée et "Annuler" reste
+    /// disponible, seule la confirmation manque.
+    /// </summary>
+    public void ShowWarning(string message) => Display($"⚠️ {message}", autoHideMs: 4000);
+
     private void Display(string text, int? autoHideMs)
     {
         _hideTimer.Stop();
