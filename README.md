@@ -133,19 +133,25 @@ message dans WhatsApp/Slack/Teams avant la fin de l'injection.
 équivalents) : certaines peuvent accepter une écriture sans mettre à jour leur propre état
 interne (le texte s'affiche mais l'application "ne le voit pas", et il peut disparaître à
 l'envoi) — et une référence UI Automation mémorisée peut devenir périmée dès que le
-contenu change, rendant une vérification intermédiaire peu fiable (c'est pour cette raison
-que le repli clavier n'effectue plus qu'un seul envoi, sans relecture en cours de route).
-Après écriture, DONNA tente une vérification finale facultative (relecture du focus
-courant) ; si elle échoue ou ne correspond pas, un simple avertissement s'affiche — DONNA
-n'envoie alors plus aucune touche et ne tente jamais de corriger après coup. **"Annuler la
-dernière transformation" reste le vrai filet de sécurité** dans ce cas, pas la
-vérification elle-même. Vérifie toujours que le résultat est bien pris en compte par
-l'application (pas seulement affiché) sur une application que tu n'as pas encore testée.
+contenu change (React remplace le nœud DOM du champ), rendant une vérification
+intermédiaire peu fiable. C'est pour cette raison que le repli clavier n'effectue plus
+qu'un seul envoi, sans relecture en cours de route : après écriture, DONNA sonde le focus
+courant pendant environ une seconde (une référence fraîche à chaque tentative, jamais
+l'ancienne) pour une vérification finale facultative. Elle ne conclut à un problème que
+si le champ est resté **identique à son état d'origine** pendant tout ce délai — une
+lecture devenue temporairement impossible ou un texte différent des deux (l'ancien et le
+nouveau) compte comme un changement réel, même non confirmable au caractère près, donc
+comme un succès. Seul le cas "rien n'a bougé" affiche un avertissement — DONNA n'envoie
+alors aucune touche supplémentaire et ne tente jamais de corriger après coup. **"Annuler
+la dernière transformation" reste le vrai filet de sécurité** dans ce cas, pas la
+vérification elle-même, qui reste mémorisée que le résultat soit confirmé ou non. Vérifie
+toujours que le résultat est bien pris en compte par l'application (pas seulement
+affiché) sur une application que tu n'as pas encore testée.
 
 Dans tous les cas où la lecture échoue, ou où l'appel IA échoue avant toute écriture,
 **rien n'est modifié dans le champ**. Une fois l'écriture effectuée (mode 2), DONNA ne
-revient jamais en arrière automatiquement, même si la vérification finale est
-incertaine — utilise "Annuler" au besoin.
+revient jamais en arrière automatiquement, même si la vérification finale échoue —
+utilise "Annuler" au besoin.
 
 ## Build depuis les sources
 
@@ -197,7 +203,9 @@ Détail module par module : voir [ARCHITECTURE.md](ARCHITECTURE.md).
   toutes les applications) — la réponse remplace l'intégralité du champ.
 - VS Code (éditeur de code) n'est pas supporté pour le mode 2 — voir
   [Applications supportées](#applications-supportées). Les modes 1 et 3 y fonctionnent normalement.
-- En cas d'échec (appel IA, lecture, ou écriture même après le repli clavier), DONNA
-  n'efface ni ne modifie rien de définitif : la formule tapée reste visible (mode 1/3) ou
-  le texte d'origine est restauré (mode 2, voir ARCHITECTURE.md §7.6).
+- En cas d'échec avant toute écriture (appel IA, lecture), DONNA n'efface ni ne modifie
+  rien : la formule tapée reste visible (mode 1/3), ou le mode retombe sur la génération
+  pure (mode 2 → 3). Une fois l'écriture effectuée (mode 2), DONNA ne restaure jamais rien
+  automatiquement, même si la vérification finale échoue — "Annuler la dernière
+  transformation" est le mécanisme de recours (voir ci-dessus et ARCHITECTURE.md §7.6).
 - Icône temporaire simple (monogramme "D") — pas encore de charte graphique dédiée.
